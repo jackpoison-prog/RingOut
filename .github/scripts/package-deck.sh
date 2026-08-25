@@ -149,6 +149,10 @@ install -m 755 "$SRC/RingOut"    "$STAGE/RingOut"
 # it is prebuilt -- so the launcher runs this the first time a game is present.
 install -m 755 "$REPO/dist/shared/gc-art.py" "$STAGE/tools/gc-art.py"
 install -m 644 "$SRC/README.txt" "$STAGE/README.txt"
+# The version line is stamped at stage time rather than maintained by hand.
+# The 1.2.1 release shipped a README whose first line read "Ver 1.1" because
+# this was a verbatim copy and nobody edits a header twice.
+sed -i "1s/^Ring Out - Ver .*/Ring Out - Ver $VERSION/" "$STAGE/README.txt"
 install -m 644 "$SRC/CREDITS.txt" "$STAGE/CREDITS.txt"
 for f in "$SRC"/shaders/*.glsl; do install -m 644 "$f" "$STAGE/shaders/"; done
 

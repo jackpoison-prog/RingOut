@@ -163,7 +163,12 @@ back end is saturated at IPC 1.92. The workload is not inefficient, just large:
   and unmaintained, under `attic/windows/`. Linux and the Steam Deck are the
   supported targets.
 - The `-march=native` build is machine-specific by design; setup compiles on your
-  own machine, so this only matters if you copy a built folder to another CPU.
+  own machine. It matters in exactly one place: the Deck package ships no module
+  and sends you here to build one, and a module built on a Zen 4/5 or recent
+  Intel desktop carries instructions the Deck's Zen 2 cannot execute — an instant
+  crash, not a load error. **Use `./setup.sh --deck <disc>` for a module you
+  intend to copy to a Deck**; it builds `-march=x86-64-v3` and checks the glibc
+  floor, the other way a copied module fails.
 
 ### Fixed since the last revision of this page
 

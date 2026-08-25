@@ -1,4 +1,4 @@
-Ring Out - Ver 1.1
+Ring Out - Ver 1.3
 Steam Deck / SteamOS build
 ==========================
 
@@ -9,18 +9,33 @@ on the Deck itself. The runtime is prebuilt against an old glibc instead.
 
   runtime  built against glibc 2.36; SteamOS ships ~2.37, and binaries run
            forward across glibc versions but never backward
-  module   -march=x86-64-v3, which the Deck's Zen 2 supports
+  module   must be -march=x86-64-v3, which the Deck's Zen 2 supports, and
+           must have a glibc floor of 2.37 or lower. The desktop package's
+           setup.sh gets both right if you pass --deck; it checks the result
+           and tells you if it could not.
 
 GETTING YOUR GAME ONTO IT
   The recompiled module is derived from your own disc, so it cannot ship
   with this package. Produce it once on a desktop Linux machine using the
   normal package, then copy two things across:
 
-    1. Run  ./setup.sh /path/to/your/disc.iso  in the desktop package
+    1. Run  ./setup.sh --deck /path/to/your/disc.iso  in the desktop package
     2. Copy its  game/  directory into this folder
     3. Copy its  bin/g<ID>_recomp.so  into this folder's  bin/
 
   The launcher checks for both and will tell you which one is missing.
+
+  --deck MATTERS. Without it setup builds for the machine it runs on, and
+  a module built on a Zen 4/5 or a recent Intel desktop carries AVX-512 or
+  AVX-VNNI instructions the Deck's Zen 2 cannot execute -- which is not a
+  polite error but an instant crash, possibly mid-match. --deck also checks
+  the glibc floor, the other way a copied module fails: build on a current
+  distro (Arch, Fedora, Ubuntu 24.04) and it wants glibc 2.38, SteamOS has
+  ~2.37, and it dies at load. That one --deck can only diagnose, not fix --
+  build the module on Debian 12 or Ubuntu 22.04 if you hit it.
+
+  Both failures used to arrive silently at the end of a long recompile.
+  setup.sh now says which one you have, and what to do about it.
 
 INSTALLING
   Put this folder anywhere on the Deck -- internal storage or an SD card.

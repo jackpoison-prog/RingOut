@@ -1,22 +1,56 @@
 #!/bin/bash
-# Ring Out - Ver 1.0 : first-time setup
+# Ring Out : first-time setup
 #
 # Builds your personal copy from a GameCube disc image you already have. Nothing
 # game-derived ships with this package -- this script extracts the disc and
 # recompiles its executable here, on your machine.
 #
-# Usage:  ./setup.sh /path/to/your/disc.iso
+# Usage:  ./setup.sh [--deck] /path/to/your/disc.iso
+#
+#   --deck   build a module that will also run on a Steam Deck, which you then
+#            copy into the Deck package. See "THE DECK BUILD" below.
 set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "$0")")"
 DEPS="$HERE/module-src/deps"
-ISO="${1:-}"
+
+# THE DECK BUILD. The Deck package ships no module and its README sends players
+# here to make one -- so this script produces the artifact that has to run on
+# SOMEONE ELSE'S CPU, and two properties of the build host decide whether it
+# will. Both fail silently at the end of a long recompile, which is the worst
+# possible time to find out:
+#
+#   -march   "native" targets THIS machine. The Deck is Zen 2, which tops out at
+#            x86-64-v3; a module built on a Zen 4/5 or a recent Intel part can
+#            carry AVX-512 or AVX-VNNI, and the Deck takes SIGILL -- an instant
+#            crash with no message, possibly mid-match.
+#   glibc    the module links whatever the host has. SteamOS is ~2.37 and
+#            binaries run forward across glibc versions but never backward, so a
+#            module built on a current distro dies at dlopen.
+#
+# --deck fixes the first and checks the second. Without it the build is tuned
+# for this machine, which is faster and right for playing here.
+DECK=0
+ISO=""
+for arg in "$@"; do
+    case "$arg" in
+        --deck) DECK=1 ;;
+        *)      [ -z "$ISO" ] && ISO="$arg" ;;
+    esac
+done
 
 if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
-    echo "Usage: ./setup.sh /path/to/your/disc.iso"
+    echo "Usage: ./setup.sh [--deck] /path/to/your/disc.iso"
     echo
     echo "Supply a GameCube disc image you already have."
+    echo "  --deck   build a module that also runs on a Steam Deck"
     exit 1
+fi
+
+if [ "$DECK" = 1 ]; then
+    MARCH="x86-64-v3"
+else
+    MARCH="native"
 fi
 
 missing=""
@@ -127,7 +161,7 @@ fi
 cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER="$CC" \
-      -DCMAKE_C_FLAGS="-march=native" \
+      -DCMAKE_C_FLAGS="-march=$MARCH" \
       "${PGO_ARGS[@]}" \
       -DGAME_ID="$DISC_ID" \
       -DGENERATED_DIR="$HERE/work/out/generated" \
@@ -150,21 +184,62 @@ cp "$HERE/work/build/g${DISC_ID}_recomp.so" "$HERE/bin/"
 # sees it. That is how a single fmod call quietly raised the floor to 2.38 on
 # every current distro until 2026-08-12.
 #
-# A WARNING, not an error: if you are only playing on this machine the floor is
-# irrelevant and setup has succeeded.
+# Checked here or nowhere: the module is built on the PLAYER's machine, so no
+# release gate ever sees it. That is how a single fmod call quietly raised the
+# floor to 2.38 on every current distro until 2026-08-12.
+MODULE="$HERE/bin/g${DISC_ID}_recomp.so"
+deck_ok=1
+
+floor=""
 if command -v objdump >/dev/null 2>&1; then
-    floor="$(objdump -T "$HERE/bin/g${DISC_ID}_recomp.so" 2>/dev/null |
+    floor="$(objdump -T "$MODULE" 2>/dev/null |
              grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
-    # sort -V puts the newer version last, so the floor is too high exactly when
-    # it sorts after 2.37 and is not 2.37 itself.
-    if [ -n "$floor" ] && [ "$floor" != "2.37" ] &&
-       [ "$(printf '%s\n2.37\n' "$floor" | sort -V | tail -1)" = "$floor" ]; then
-        echo
-        echo "    NOTE: this module needs glibc $floor, and SteamOS has about 2.37."
-        echo "          It runs fine here. It will NOT load if you copy it to a Steam"
-        echo "          Deck -- build the module on an older distro (Debian 12 or"
-        echo "          Ubuntu 22.04) if you need one for the Deck."
+fi
+# sort -V puts the newer version last, so the floor is too high exactly when it
+# sorts after 2.37 and is not 2.37 itself.
+if [ -n "$floor" ] && [ "$floor" != "2.37" ] &&
+   [ "$(printf '%s\n2.37\n' "$floor" | sort -V | tail -1)" = "$floor" ]; then
+    deck_ok=0
+    glibc_problem="needs glibc $floor; SteamOS has about 2.37"
+    glibc_fix="build on an older distro (Debian 12 or Ubuntu 22.04)"
+fi
+
+# The instruction-set half. -march=native targets THIS CPU; anything above
+# x86-64-v3 is not executable on the Deck's Zen 2 and shows up as an instant
+# crash rather than a load error, so it is worth naming before it happens.
+if [ "$MARCH" = "native" ] &&
+   grep -qE '^flags.*\b(avx512[a-z0-9]*|avx_vnni|avxvnni|amx_tile)\b' /proc/cpuinfo 2>/dev/null; then
+    deck_ok=0
+    isa_problem="this CPU has instructions the Deck's Zen 2 does not (AVX-512 or AVX-VNNI)"
+    isa_fix="re-run with  ./setup.sh --deck \"$ISO\""
+fi
+
+if [ "$DECK" = 1 ] && [ "$deck_ok" = 0 ]; then
+    echo
+    echo "    ============================================================"
+    echo "    THIS MODULE WILL NOT RUN ON A STEAM DECK."
+    echo "    You asked for --deck, so this is a failure, not a note:"
+    [ -n "${glibc_problem:-}" ] && echo "      - $glibc_problem"
+    [ -n "${glibc_problem:-}" ] && echo "        fix: $glibc_fix"
+    [ -n "${isa_problem:-}" ] && echo "      - $isa_problem"
+    [ -n "${isa_problem:-}" ] && echo "        fix: $isa_fix"
+    echo "    It plays fine on THIS machine -- setup has otherwise succeeded."
+    echo "    ============================================================"
+elif [ "$deck_ok" = 0 ]; then
+    echo
+    problem="${glibc_problem:-}"
+    if [ -n "${isa_problem:-}" ]; then
+        [ -n "$problem" ] && problem="$problem; "
+        problem="$problem$isa_problem"
     fi
+    echo "    NOTE: this module is built for this machine and will not run on a"
+    echo "          Steam Deck ($problem)."
+    echo "          If you want one for the Deck: ./setup.sh --deck \"$ISO\""
+    [ -n "${glibc_problem:-}" ] && echo "          ...and $glibc_fix, which --deck cannot do for you."
+elif [ "$DECK" = 1 ]; then
+    echo
+    echo "    Deck-compatible: -march=x86-64-v3, glibc floor ${floor:-unknown}."
+    echo "    Copy game/ and bin/g${DISC_ID}_recomp.so into the Deck package."
 fi
 
 # The game's own artwork, taken from the disc you supplied. None of it ships in

@@ -13,16 +13,28 @@ QUICK START
 
   You can also do the setup step directly:
       ./setup.sh /path/to/your/disc.iso
+      ./setup.sh --deck /path/to/your/disc.iso    (module for a Steam Deck)
 
 ON A STEAM DECK?
   Download RingOut-1.1-steamdeck-x86_64.zip instead -- it ships prebuilt
   binaries, because SteamOS mounts /usr read-only and has no C headers, so
   nothing can be compiled on the device.
 
-  You still need THIS package once, on a desktop: run its setup to build
-  the module from your disc, then copy game/ and bin/g<ID>_recomp.so into
-  the Deck package. Add its RingOut launcher to Steam as a non-Steam game
-  to run it from Game Mode.
+  You still need THIS package once, on a desktop. Build the module with
+  the --deck flag:
+
+      ./setup.sh --deck /path/to/your/disc.iso
+
+  then copy game/ and bin/g<ID>_recomp.so into the Deck package. Add its
+  RingOut launcher to Steam as a non-Steam game to run it from Game Mode.
+
+  Do not skip --deck. A normal build targets THIS machine, and on a Zen 4/5
+  or recent Intel desktop that means instructions the Deck's Zen 2 cannot
+  execute -- the module crashes instantly there rather than reporting
+  anything. --deck also checks the module's glibc floor, which is the other
+  way a copied module fails: built on a current distro it needs glibc 2.38
+  and SteamOS has about 2.37, so it will not load. That one --deck can only
+  tell you about; the fix is to build on Debian 12 or Ubuntu 22.04.
 
 REQUIREMENTS
   - A GameCube disc image you already have
