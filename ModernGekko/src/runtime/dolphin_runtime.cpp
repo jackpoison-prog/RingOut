@@ -326,20 +326,26 @@ void ApplyCoreSettings(const GameMetadata &metadata) {
     Config::SetBase(Config::MAIN_CUSTOM_RTC_ENABLE, true);
     Config::SetBase(Config::MAIN_CUSTOM_RTC_VALUE, 0x386D4380u);
   }
-  // SoulCalibur II (GRSEAF): the OS scheduler spins in an idle loop at
-  // 0x80185DEC waiting for an interrupt to wake a task. Without idle-skip the
-  // recomp core burns real wall-time executing that spin, which halved FMV /
-  // gameplay speed (movies ran in slow-motion). Pointing the core's idle-skip
-  // at that PC makes CoreTiming fast-forward to the next event instead → full
-  // 60fps. (Idle-skip is the standard Dolphin approach; only the PC is game-
-  // specific, so it is scoped to this disc ID.)
-  // GRSEPS is the "SC2 Plus" community mod. It appends its own code at
+  // The OS scheduler spins in an idle loop waiting for an interrupt to wake a
+  // task. Without idle-skip the recomp core burns real wall-time executing that
+  // spin, which halved FMV / gameplay speed (movies ran in slow-motion).
+  // Pointing the core's idle-skip at that PC makes CoreTiming fast-forward to
+  // the next event instead → full 60fps. (Idle-skip is the standard Dolphin
+  // approach; only the PC is game-specific.)
+  //
+  // The address is per-build, so InspectGame finds the loop in the DOL rather
+  // than this being a constant per disc ID -- which is what lets a disc from
+  // another region run at full speed without a new constant here. It resolves
+  // to 0x80185DEC on GRSEAF (the value this was, hand-found) and 0x8017F35C on
+  // GRSJAF. GRSEPS, the "SC2 Plus" community mod, appends its own code at
   // 0x80476000 and hooks the base text in place rather than relocating it, so
-  // the scheduler and its idle loop stay where they were: the four
-  // instructions at 0x80185DEC are byte-identical between the two discs
-  // (verified section by section against the stock DOL). Same spin, same skip.
-  if (metadata.disc_id == "GRSEAF" || metadata.disc_id == "GRSEPS")
-    Config::SetBase(Config::MAIN_STATICRECOMP_IDLE_PC, 0x80185DECu);
+  // its scheduler and idle loop stay where GRSEAF's are and it detects to the
+  // same address.
+  //
+  // Left unset when no single loop matches: idle-skip then stays off, exactly
+  // as it was for every disc but this one before.
+  if (metadata.idle_pc)
+    Config::SetBase(Config::MAIN_STATICRECOMP_IDLE_PC, *metadata.idle_pc);
 }
 
 void ApplyGraphicsSettings(const GraphicsSettings &graphics, bool headless) {

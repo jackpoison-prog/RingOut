@@ -22,6 +22,10 @@ struct GameMetadata
   GamePlatform platform = GamePlatform::GameCube;
   std::uint32_t entry_point = 0;
   std::string dol_sha256;
+  // Guest PC of the OS idle spin loop, when the DOL contains exactly one loop
+  // of that shape. Empty when it does not, so the caller can tell "no idle
+  // loop found" from "the loop is at address zero".
+  std::optional<std::uint32_t> idle_pc;
 };
 
 struct GameInspectResult

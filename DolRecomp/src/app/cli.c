@@ -25,7 +25,7 @@ void print_usage(const char* argv0) {
         "  --chain-calls                  Emit local bl as a native goto (measured no win; off)\n");
     fprintf(stderr, "  --dispatch-pc <addr>           Guest PC the host hooks by address; calls to it stay\n");
     fprintf(stderr, "                                 dispatcher returns. Repeatable.\n");
-    fprintf(stderr, "  --idle-pc <addr>               Guest PC of the OS idle spin loop; its back-edge stays\n");
+    fprintf(stderr, "  --idle-pc <addr|auto>          Guest PC of the OS idle spin loop; its back-edge stays\n");
     fprintf(stderr, "                                 a dispatcher return so the host can still idle-skip\n");
     fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
     fprintf(stderr, "  --setup                        Download titles database and optionally install wit\n");
@@ -229,6 +229,11 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "error: --idle-pc needs a guest address\n");
                 return 0;
+            }
+            if (strcmp(argv[i + 1], "auto") == 0) {
+                opts->idle_pc_auto = 1;
+                ++i;
+                continue;
             }
             opts->idle_pc = (u32)strtoul(argv[++i], NULL, 0);
             continue;

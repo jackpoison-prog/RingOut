@@ -17,6 +17,9 @@ typedef struct {
     /* Guest PC of the OS idle spin loop (--idle-pc), or 0. Back-edges to it stay
      * dispatcher returns so the host can still recognise and skip it. */
     u32 idle_pc;
+    /* --idle-pc auto: find the loop in the DOL instead of being told where it
+     * is, so a disc from another region recompiles without a new constant. */
+    int idle_pc_auto;
     int llvm_backend;   // --backend llvm
     /* Guest PCs the run loop hooks by address (--dispatch-pc). Calls to these
        must not be chained into native gotos or the hook never fires. */

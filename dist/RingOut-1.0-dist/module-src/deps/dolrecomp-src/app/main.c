@@ -10,6 +10,7 @@
 #include "frontend/container/rpx.h"
 #include "frontend/container/disc_extract.h"
 #include "backend/emitter.h"
+#include "analysis/idle_loop.h"
 #include "analysis/symbol_map.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -216,6 +217,20 @@ int main(int argc, char** argv) {
         return 1;
     dol_print_info(&dol, game_name);
     printf("cpu: %s\n", cpu_display_name(effective_cpu));
+
+    /* Deferred until the DOL is loaded: --idle-pc auto has to look at the code
+     * to find the loop. The address is set before any chunk is written, which
+     * is all emit_set_idle_pc requires. */
+    if (opts.idle_pc_auto) {
+        u32 detected = 0;
+        if (dol_find_idle_pc(&dol, &detected)) {
+            printf("idle loop: 0x%08X (detected)\n", detected);
+            emit_set_idle_pc(detected);
+        } else {
+            printf("idle loop: not found -- idle-skip will be off, and this build\n"
+                   "           will run at roughly half speed. Pass --idle-pc <addr>.\n");
+        }
+    }
 
     if (!output_arg) {
         printf("\ngenerating code...\n");

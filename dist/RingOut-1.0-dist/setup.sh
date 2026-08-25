@@ -95,10 +95,15 @@ mkdir -p "$HERE/work"
 # --idle-pc is not optional. Loop back-edges are compiled as native gotos, which
 # is where most of the recompiler's speed comes from -- but the OS idle spin
 # loop must stay a dispatcher return, or the host never sees the guest idling
-# and idle-skip silently stops working. 0x80185DEC is that loop in SOULCALIBUR
-# II (GRSEAF). A wrong address for some other disc is harmless: it only forces
-# one extra back-edge through the dispatcher, which is always valid.
-"$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc 0x80185DEC \
+# and idle-skip silently stops working, at a cost of about half the frame rate.
+#
+# "auto" finds that loop in YOUR disc's DOL instead of assuming one disc's
+# address: it is at 0x80185DEC in the US release and 0x8017F35C in the Japanese
+# one, so the constant this used to pass was right for exactly one of them. The
+# recompiler prints the address it found. If it finds none -- or more than one
+# candidate, which it will not guess between -- it says so and carries on; the
+# build is still correct, just slower.
+"$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
     -j"$(nproc)" "$HERE/work/out"
 # gen_module_tables.py reads main.dol from alongside the generated sources.
 cp "$HERE/game/sys/main.dol" "$HERE/work/out/generated/main.dol"

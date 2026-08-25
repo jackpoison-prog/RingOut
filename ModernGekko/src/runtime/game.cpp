@@ -32,6 +32,59 @@ std::uint32_t ReadBE32(const std::uint8_t* p)
          (std::uint32_t{p[2]} << 8) | p[3];
 }
 
+// Finds the OS idle spin loop in a GameCube DOL, by shape rather than by disc.
+//
+// The scheduler parks in three instructions while it waits for an interrupt:
+//
+//     lwz    rD, d(r13)      the wake flag, read through the small-data base
+//     cmplwi rD, 0
+//     beq-   -8              back to the lwz
+//
+// Pointing the core's idle-skip at that PC is worth roughly half the frame rate
+// (without it the recomp core burns wall-time on the spin and FMV runs in slow
+// motion), and the address moves with every build of the game -- so it is found
+// here instead of being a constant per disc ID.
+//
+// Spins of this shape are rare but not unique; only the scheduler's reads its
+// flag through r13 and compares it unsigned. Both discs measured carry a second
+// r13-relative spin that uses the signed cmpwi, which is why that form is not
+// accepted. If more than one candidate survives, none is returned: choosing
+// wrongly costs the same frame rate as choosing nothing, and does it silently.
+std::optional<std::uint32_t> FindIdlePc(const std::vector<std::uint8_t>& dol)
+{
+  constexpr std::uint32_t kSdaBaseReg = 13;
+  std::optional<std::uint32_t> found;
+  int count = 0;
+  for (std::size_t section = 0; section < 7; ++section)
+  {
+    const std::uint32_t offset = ReadBE32(dol.data() + section * 4);
+    const std::uint32_t address = ReadBE32(dol.data() + 0x48 + section * 4);
+    const std::uint32_t size = ReadBE32(dol.data() + 0x90 + section * 4);
+    if (size < 12 || offset == 0 || address == 0)
+      continue;
+    if (static_cast<std::uint64_t>(offset) + size > dol.size())
+      continue;
+    for (std::uint32_t at = 0; at + 12 <= size; at += 4)
+    {
+      const std::uint8_t* p = dol.data() + offset + at;
+      const std::uint32_t w0 = ReadBE32(p);
+      const std::uint32_t w1 = ReadBE32(p + 4);
+      const std::uint32_t w2 = ReadBE32(p + 8);
+      if ((w0 >> 26) != 32 || ((w0 >> 16) & 31) != kSdaBaseReg)  // lwz rD, d(r13)
+        continue;
+      const std::uint32_t rd = (w0 >> 21) & 31;
+      if (w1 != (0x28000000u | (rd << 16)))  // cmplwi rD, 0
+        continue;
+      if (w2 != 0x4182FFF8u)  // beq -8
+        continue;
+      if (count == 0)
+        found = address + at;
+      ++count;
+    }
+  }
+  return count == 1 ? found : std::nullopt;
+}
+
 std::string Sha256(std::vector<std::uint8_t> data)
 {
   const std::uint64_t bit_size = static_cast<std::uint64_t>(data.size()) * 8;
@@ -153,6 +206,7 @@ GameInspectResult InspectGame(const std::filesystem::path& input_root)
   metadata.disc_id = std::move(id);
   metadata.platform = wii_magic == 0x5d1c9ea3 ? GamePlatform::Wii : GamePlatform::GameCube;
   metadata.entry_point = entry_point;
+  metadata.idle_pc = FindIdlePc(*dol);
   metadata.dol_sha256 = Sha256(std::move(*dol));
   return {std::move(metadata), {}};
 }

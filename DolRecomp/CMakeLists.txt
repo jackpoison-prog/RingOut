@@ -66,6 +66,7 @@ endif()
 
 add_library(dr_analysis STATIC
     src/analysis/embedded_data.c
+    src/analysis/idle_loop.c
     src/analysis/smc.c
     src/analysis/symbol_map.c
 )
@@ -185,6 +186,12 @@ add_test(NAME lazy_fprf COMMAND test_lazy_fprf)
 add_executable(test_idle_pc tests/test_idle_pc.c)
 target_link_libraries(test_idle_pc PRIVATE dr_backend)
 add_test(NAME idle_pc COMMAND test_idle_pc)
+
+# ...and this pins the scan that supplies the address to it, which is what
+# --idle-pc auto rests on for a disc nobody has hand-inspected.
+add_executable(test_idle_loop tests/test_idle_loop.c)
+target_link_libraries(test_idle_loop PRIVATE dr_analysis)
+add_test(NAME idle_loop COMMAND test_idle_loop)
 
 add_executable(test_dispatch tests/test_dispatch.c)
 target_link_libraries(test_dispatch PRIVATE dr_backend)
