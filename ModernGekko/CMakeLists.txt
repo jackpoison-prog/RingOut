@@ -27,6 +27,10 @@ option(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME
        "Build the RecompCore/Dolphin production chassis" ON)
 option(MODERNGEKKO_ENABLE_DOLPHIN_TESTS
        "Build the imported Dolphin unit-test targets" OFF)
+# dolphin-tool reads the disc formats DolRecomp's own extractor does not (RVZ,
+# GCZ, WIA). Off by default -- it is a development tool, not part of the chassis.
+option(MODERNGEKKO_ENABLE_DOLPHIN_CLI_TOOL
+       "Build the imported dolphin-tool disc utility" OFF)
 set(MODERNGEKKO_FRONTEND_SDK "" CACHE PATH
     "Optional non-root sysroot containing X11 and audio development packages")
 
@@ -63,7 +67,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(MODERNGEKKO_ENABLE_IMGUI_LAUNCHER ON CACHE BOOL "" FORCE)
     set(ENABLE_QT OFF CACHE BOOL "" FORCE)
     set(ENABLE_NOGUI OFF CACHE BOOL "" FORCE)
-    set(ENABLE_CLI_TOOL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_CLI_TOOL ${MODERNGEKKO_ENABLE_DOLPHIN_CLI_TOOL} CACHE BOOL "" FORCE)
     set(ENABLE_TESTS ${MODERNGEKKO_ENABLE_DOLPHIN_TESTS} CACHE BOOL "" FORCE)
     set(ENABLE_AUTOUPDATE OFF CACHE BOOL "" FORCE)
     set(ENABLE_ANALYTICS OFF CACHE BOOL "" FORCE)
