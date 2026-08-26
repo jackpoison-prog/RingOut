@@ -1,6 +1,7 @@
 # Ring Out
 
-A native PC port of a GameCube fighting game (disc ID `GRSEAF`), produced by **static
+A native PC port of a GameCube fighting game (disc IDs `GRSEAF`, `GRSJAF`, `GRSPAF`),
+produced by **static
 recompilation** rather than emulation: the disc's PowerPC executable is translated
 ahead of time into C, compiled for x86-64, and run as native code inside a
 Dolphin-derived runtime that provides the graphics, audio, input and hardware
@@ -18,8 +19,24 @@ fallback**: every executed block runs as native code. The recompiler translates
 535,368 instructions with 0 unknown opcodes. Rendering is Vulkan on the GPU, with
 the CPU emulation and the runtime on separate cores.
 
+**All three regions**: US (`GRSEAF`), Japan (`GRSJAF`) and Europe (`GRSPAF`) each
+recompile with 0 unknown opcodes and play — 535,368 / 527,592 / 543,008
+instructions respectively. Nothing is keyed to a disc ID: the one address that
+used to be a US constant, the OS idle loop the core's idle-skip needs, is now
+found in your own disc's executable by matching the loop's shape. JP runs at 60
+fps and PAL at 50, which is full speed for 50 Hz content.
+
+Two caveats for the non-US discs. The 23 shipped cheat codes are US addresses and
+do not carry over, so those players get an empty cheat list; and the PGO profile
+is trained on US code, which a JP or PAL module can barely use — measured at
+−3.8% instructions against the ~−11.9% a US player gets. Both build and play
+correctly either way.
+
 **Steam Deck**: supported, with its own prebuilt package — no toolchain, no
 compile step. Runs in both Desktop and Game Mode at 45–49 fps in a match.
+Build the module you copy across with `./setup.sh --deck`: a normal build targets
+the machine it runs on, and on a recent desktop CPU that means instructions the
+Deck's Zen 2 cannot execute.
 
 **Netplay**: working. Rollback over a deterministic dual-core setup, with a lobby
 showing live ping and per-player game status; two peers stayed byte-identical
@@ -33,11 +50,11 @@ Two packages, from the [Releases](../../releases) page:
 
 | | for | needs a toolchain? |
 | --- | --- | --- |
-| `RingOut-1.2.1-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
-| `RingOut-1.2.1-steamdeck-x86_64.zip` | Steam Deck / SteamOS | no — prebuilt |
+| `RingOut-1.3-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
+| `RingOut-1.3-steamdeck-x86_64.zip` | Steam Deck / SteamOS | no — prebuilt |
 
 The Deck package ships no module: build one on a desktop with the package below,
-then copy `game/` and `bin/gGRSEAF_recomp.so` across. Add `RingOut` to Steam as a
+then copy `game/` and `bin/g<ID>_recomp.so` across. Add `RingOut` to Steam as a
 non-Steam game to launch it from Game Mode.
 
 For desktop, unzip and run:

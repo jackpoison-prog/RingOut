@@ -33,7 +33,7 @@ OUT="${OUT:-$REPO/dist}"
 # working package directory, which keeps its historical RingOut-1.0-* name:
 # that is 1.3 GB of developer state referenced by .gitignore and a dozen
 # scripts, and renaming it would churn all of them for nothing a player sees.
-VERSION="${VERSION:-1.2.1}"
+VERSION="${VERSION:-1.3}"
 PKG="RingOut-1.0-deck"
 SRC="$REPO/dist/$PKG"
 
