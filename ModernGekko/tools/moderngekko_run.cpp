@@ -1,5 +1,9 @@
 #include "frontend_config.hpp"
 #include "moderngekko/game.hpp"
+#include "DiscIO/DiscExtractor.h"
+#include "DiscIO/Filesystem.h"
+#include "DiscIO/Volume.h"
+#include "DiscIO/VolumeDisc.h"
 #include "moderngekko/runtime.hpp"
 #include "netplay_session.hpp"
 
@@ -47,7 +51,16 @@ void Usage() {
                "                                  1 = arrows+ZXCV, 2 = "
                "IJKL+BNM)\n"
                "       With no --game, boots the path in "
-               "<user-dir>/default-game.txt.\n";
+               "<user-dir>/default-game.txt.\n"
+               "\n"
+               "       moderngekko-run --extract <disc image> <output dir>\n"
+               "                                 extract a disc without "
+               "launching anything.\n"
+               "                                 Reads .iso .gcm .wbfs .rvz "
+               ".gcz .wia and\n"
+               "                                 NKit variants -- more formats "
+               "than the\n"
+               "                                 recompiler's own extractor.\n";
 }
 
 std::filesystem::path
@@ -91,6 +104,61 @@ std::filesystem::path ExecutableDirectory(const char *argv0) {
   return ec ? std::filesystem::current_path() : executable.parent_path();
 }
 } // namespace
+
+// Extracts a disc image using Dolphin's DiscIO, which reads every format the
+// launcher's file picker offers -- .rvz, .gcz, .wia, .nkit and friends -- rather
+// than the .iso/.gcm/.wbfs that the recompiler's own extractor handles.
+//
+// That mismatch was a real dead end for players: the picker offered .rvz, setup
+// then said "unsupported format: only .iso and .wbfs are supported", and the
+// suggested fix was to go and find another tool. The code to read those formats
+// was already in this binary the whole time -- 1400-odd DiscIO symbols -- it was
+// simply not reachable from the extraction step.
+//
+// The layout written here is the one the recompiler expects and the one
+// InspectGame reads: sys/{boot.bin,bi2.bin,apploader.img,main.dol,fst.bin} plus
+// files/. ExportSystemData writes that sys/ set exactly, so this is wiring,
+// not a reimplementation.
+int RunExtract(const std::string &image, const std::string &out_dir) {
+  const std::unique_ptr<DiscIO::VolumeDisc> volume = DiscIO::CreateDisc(image);
+  if (!volume) {
+    std::cerr << "could not open " << image << " as a disc image\n";
+    return 1;
+  }
+  const DiscIO::Platform platform = volume->GetVolumeType();
+  if (platform != DiscIO::Platform::GameCubeDisc) {
+    std::cerr << image << " is not a GameCube disc image\n";
+    return 1;
+  }
+  const DiscIO::Partition partition = DiscIO::PARTITION_NONE;
+
+  std::error_code ec;
+  std::filesystem::create_directories(out_dir, ec);
+  if (!DiscIO::ExportSystemData(*volume, partition, out_dir)) {
+    std::cerr << "could not write the system files from " << image << "\n";
+    return 1;
+  }
+
+  const DiscIO::FileSystem *filesystem = volume->GetFileSystem(partition);
+  if (!filesystem) {
+    std::cerr << image << " has no readable filesystem\n";
+    return 1;
+  }
+  const std::unique_ptr<DiscIO::FileInfo> root = filesystem->FindFileInfo("");
+  if (!root) {
+    std::cerr << image << " has no root directory\n";
+    return 1;
+  }
+  DiscIO::ExportDirectory(*volume, partition, *root, true, "", out_dir + "/files",
+                          [](const std::string &) { return false; });
+
+  // Report the disc ID, so the caller does not have to re-read boot.bin to find
+  // out what it just extracted, and so a wrong disc is obvious immediately.
+  const std::string game_id = volume->GetGameID(partition);
+  std::cout << "game id: " << game_id << "\n";
+  std::cout << "extracted to: " << out_dir << "\n";
+  return 0;
+}
 
 int RunMain(int argc, char **argv) {
   moderngekko::RuntimeConfig config;
@@ -471,6 +539,15 @@ int RunMain(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+  // Handled before the normal option loop: this is a tool mode, not a way to
+  // launch the game, and it must not need a module or a user directory.
+  if (argc >= 4 && std::string(argv[1]) == "--extract")
+    return RunExtract(argv[2], argv[3]);
+  if (argc >= 2 && std::string(argv[1]) == "--extract") {
+    std::cerr << "usage: moderngekko-run --extract <disc image> <output dir>\n";
+    return 2;
+  }
+
   try {
     return RunMain(argc, argv);
   } catch (const std::exception &error) {

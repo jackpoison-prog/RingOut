@@ -198,7 +198,14 @@ enum class ConnectionError : u8
   ServerFull = 1,
   GameRunning = 2,
   VersionMismatch = 3,
-  NameTooLong = 4
+  NameTooLong = 4,
+  // The peers agree on the Dolphin build but not on what they are about to
+  // play. Two codes rather than one so the joining player is told which:
+  // a Japanese disc against a US host is a different situation from two
+  // players on the same disc whose modules came out of different recompiler
+  // builds, and only the first is something they can fix by swapping discs.
+  DifferentGame = 5,
+  CompatibilityMismatch = 6
 };
 
 enum class SyncSaveDataID : u8
@@ -264,4 +271,14 @@ void SendPowerButtonEvent();
 std::string GetGBASavePath(int pad_num);
 PadDetails GetPadDetails(int pad_num);
 int NumLocalWiimotes();
+// Identity of the recompiled game this peer is about to run: the disc ID, and a
+// fingerprint over everything else that has to match (DOL hash, module and CPU
+// ABI, every chunk hash -- see frontend::CompatibilityFingerprint).
+//
+// Set before connecting or hosting. Left empty, the exchange still happens and
+// still agrees, so a build that does not set it behaves as it always did.
+void SetGameIdentity(std::string disc_id, std::string fingerprint);
+const std::string& GetGameDiscId();
+const std::string& GetGameFingerprint();
+
 }  // namespace NetPlay

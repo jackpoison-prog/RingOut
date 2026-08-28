@@ -167,18 +167,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           apt-get install -y --no-install-recommends curl
-          # Resolve the package the build step actually produced rather than
-          # naming a version here. This path was pinned to 1.1 and went stale
-          # the moment package-deck.sh's VERSION moved, which would have
-          # published nothing (or the wrong build) on the next dispatch.
-          shopt -s nullglob
-          zips=(dist/RingOut-*-steamdeck-x86_64.zip)
-          [ ${#zips[@]} -eq 1 ] || {
-            echo "expected exactly one Deck package, found ${#zips[@]}: ${zips[*]}" >&2
-            exit 1
-          }
           .github/scripts/publish-release-asset.sh deck-latest \
-            "Steam Deck build (rolling)" "${zips[0]}"
+            "Steam Deck build (rolling)" dist/RingOut-1.1-steamdeck-x86_64.zip
 
       # A failed configure/build leaves the useful detail in these logs rather
       # than in the step output.

@@ -1,7 +1,6 @@
 # Ring Out
 
-A native PC port of a GameCube fighting game (disc IDs `GRSEAF`, `GRSJAF`, `GRSPAF`),
-produced by **static
+A native PC port of a GameCube fighting game (disc ID `GRSEAF`), produced by **static
 recompilation** rather than emulation: the disc's PowerPC executable is translated
 ahead of time into C, compiled for x86-64, and run as native code inside a
 Dolphin-derived runtime that provides the graphics, audio, input and hardware
@@ -14,29 +13,30 @@ already own; setup extracts it and recompiles it on your machine.
 
 ## Status
 
-Fully playable — boots to menu and through gameplay, with **zero interpreter
-fallback**: every executed block runs as native code. The recompiler translates
-535,368 instructions with 0 unknown opcodes. Rendering is Vulkan on the GPU, with
-the CPU emulation and the runtime on separate cores.
+Fully playable — boots to menu and through gameplay. **Every block of the game's
+own executable runs as native code**; the recompiler translates 535,368
+instructions with 0 unknown opcodes and no interpreter fallback inside them.
 
-**All three regions**: US (`GRSEAF`), Japan (`GRSJAF`) and Europe (`GRSPAF`) each
-recompile with 0 unknown opcodes and play — 535,368 / 527,592 / 543,008
-instructions respectively. Nothing is keyed to a disc ID: the one address that
-used to be a US constant, the OS idle loop the core's idle-skip needs, is now
-found in your own disc's executable by matching the loop's shape. JP runs at 60
-fps and PAL at 50, which is full speed for 50 Hz content.
+What the interpreter does still cover is the PowerPC exception vectors —
+`0x500` (external interrupt), `0xC00` (system call), `0x800` (FP unavailable).
+Those handlers are written into low RAM by the OS at boot rather than living in
+the disc's executable, so there is no recompiled code to dispatch to and the
+interpreter runs them until control returns. They account for about **0.7% of
+executed steps**, steadily, because interrupts fire for the life of the session
+— but only **0.2% of cycles**, so there is nothing to win by recompiling them.
+An earlier version of this page claimed "zero interpreter fallback", which the
+runtime's own shutdown line has always contradicted.
 
-Two caveats for the non-US discs. The 23 shipped cheat codes are US addresses and
-do not carry over, so those players get an empty cheat list; and the PGO profile
-is trained on US code, which a JP or PAL module can barely use — measured at
-−3.8% instructions against the ~−11.9% a US player gets. Both build and play
-correctly either way.
+Rendering is Vulkan on the GPU, with the CPU emulation and the runtime on
+separate cores.
 
-**Steam Deck**: supported, with its own prebuilt package — no toolchain, no
-compile step. Runs in both Desktop and Game Mode at 45–49 fps in a match.
-Build the module you copy across with `./setup.sh --deck`: a normal build targets
-the machine it runs on, and on a recent desktop CPU that means instructions the
-Deck's Zen 2 cannot execute.
+**Steam Deck**: supported, with its own package — no toolchain needed, since the
+module is built on a desktop and copied over. Runs in both Desktop and Game Mode
+at 45–49 fps in a match. It can also build *on the device*: install a toolchain
+and SteamOS compiles its own module, needing no bundled libraries at all —
+tested end to end on SteamOS 3.8.25, and the way to get the full PGO win there
+(clang 20 cannot read the shipped profiles). See
+[`dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md`](dist/RingOut-1.0-deck/BUILD-ON-THE-DECK.md).
 
 **Netplay**: working. Rollback over a deterministic dual-core setup, with a lobby
 showing live ping and per-player game status; two peers stayed byte-identical
@@ -50,11 +50,11 @@ Two packages, from the [Releases](../../releases) page:
 
 | | for | needs a toolchain? |
 | --- | --- | --- |
-| `RingOut-1.3-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
-| `RingOut-1.3-steamdeck-x86_64.zip` | Steam Deck / SteamOS | no — prebuilt |
+| `RingOut-1.1-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
+| `RingOut-1.1-steamdeck-x86_64.zip` | Steam Deck / SteamOS | no — prebuilt |
 
 The Deck package ships no module: build one on a desktop with the package below,
-then copy `game/` and `bin/g<ID>_recomp.so` across. Add `RingOut` to Steam as a
+then copy `game/` and `bin/gGRSEAF_recomp.so` across. Add `RingOut` to Steam as a
 non-Steam game to launch it from Game Mode.
 
 For desktop, unzip and run:
@@ -129,7 +129,9 @@ cycles rather than wall time. That harness exists because the earlier one did
 not measure the right thing: it ran boot and an idle menu, which carry ~0.1% of
 a real session's paired-single traffic, so a change could look free there and
 cost 3% in a match. **Earlier figures in this README were taken that way and have
-been removed rather than restated.**
+been removed rather than restated.** How the harness works, and the checks that
+stop a run from measuring the wrong thing, are in
+[docs/measuring.md](docs/measuring.md).
 
 ### What shipped
 
@@ -139,6 +141,9 @@ been removed rather than restated.**
 | Compile loop back-edges as native `goto` | dispatches −66%, CPU −11.5% |
 | Defer FPRF classification until FPSCR is observable | −2.14% cycles (Deck) |
 | `-flto=auto` | module relink 22 min → 6 |
+| Profile-guided optimisation | **−10.3% desktop, −14.1% Steam Deck** |
+| Per-region profiles | −12.33% for a JP module vs the US profile |
+| On-device profile training (`setup.sh --pgo`) | recovers the full win on any clang |
 
 The FPRF one is the shape most of these take: the FP condition register is
 written 3.07 billion times per run and read 15,885 times — mandatory by
@@ -155,13 +160,19 @@ and each one looks plausible enough to be retried:
 | BOLT post-link layout | **8.1% slower** |
 | `-O2` instead of `-O3` | **9.1% slower**, despite 12.5% less code |
 | LLVM object backend | **4% slower**, even removing 43% of dispatches |
-| Profile-guided optimisation | does not build — SIGBUS before the first frame |
 | Leaders-only entry labels | 81% of execution fell out to the interpreter |
 | Block-local register allocation | tied; no cross-iteration residency to exploit |
 | CR / XER[CA] elision | ceiling ~0.05% and ~0.2% respectively |
 
-The pattern: BOLT, `-O2` and the LLVM backend all bought instruction locality or
-fewer dispatches, and all three lost by retiring more instructions at lower IPC.
+PGO was itself in the rejected table for a long time — "does not build, SIGBUS
+before the first frame". That was true when it was written and is not any more.
+It is now the largest single win here, and the details, including the several
+ways it silently does nothing, are in
+[docs/profile-guided-optimisation.md](docs/profile-guided-optimisation.md).
+
+The pattern among the rest: BOLT, `-O2` and the LLVM backend all bought
+instruction locality or fewer dispatches, and all three lost by retiring more
+instructions at lower IPC.
 PMU attribution explains why — front-end starvation is 2.4% of cycles and the
 back end is saturated at IPC 1.92. The workload is not inefficient, just large:
 86.4 million host instructions per emulated frame.
@@ -233,6 +244,9 @@ the sources shipped beside it.
 | `dist/RingOut-1.0-deck/` | the Steam Deck package scaffolding |
 | `dist/shared/gc-art.py` | extracts the game's banner and icon on the player's machine |
 | `.github/scripts/` | packaging, the privacy scan, the GPL source shipment, benchmarks |
+| `.github/deck-notes/` | the toolchain notes kept on the test Deck's desktop |
+| `docs/measuring.md` | how performance is measured, and the checks that keep it honest |
+| `docs/profile-guided-optimisation.md` | PGO: what it is worth, and how it silently does nothing |
 | `work/mg_userdir/GameSettings/GRSEAF.ini` | the verified cheat codes |
 
 Everything is vendored as plain files — clone and build, no submodule init needed.

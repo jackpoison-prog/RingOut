@@ -548,6 +548,61 @@ if(BUILD_TESTING)
         add_test(NAME moderngekko.netplay_protocol COMMAND moderngekko_netplay_protocol_test)
     endif()
 
+    if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+        # Which discs get a cheat list is decided by the packaging scripts; this
+        # asserts the runtime plumbing they rely on, per region.
+        add_executable(moderngekko_game_cheats_test tests/game_cheats_test.cpp)
+        target_include_directories(moderngekko_game_cheats_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core")
+        # Dolphin's headers use std::to_underlying, so this needs the same
+        # standard the runtime is built with, not the default.
+        target_compile_features(moderngekko_game_cheats_test PRIVATE cxx_std_23)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            target_compile_definitions(moderngekko_game_cheats_test PRIVATE _ARCH_64=1)
+        else()
+            target_compile_definitions(moderngekko_game_cheats_test PRIVATE _ARCH_32=1)
+        endif()
+        # Same link shape as the netplay test: `core` calls Host_* hooks that the
+        # frontend provides, so the runtime archive has to come in whole.
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+            target_link_libraries(moderngekko_game_cheats_test PRIVATE
+                "$<LINK_LIBRARY:WHOLE_ARCHIVE,moderngekko>" core uicommon)
+        elseif(UNIX AND NOT APPLE)
+            target_link_libraries(moderngekko_game_cheats_test PRIVATE
+                "-Wl,--whole-archive" moderngekko "-Wl,--no-whole-archive" core uicommon)
+        else()
+            target_link_libraries(moderngekko_game_cheats_test PRIVATE
+                ModernGekko::Runtime core uicommon)
+        endif()
+        add_test(NAME moderngekko.game_cheats COMMAND moderngekko_game_cheats_test)
+    endif()
+
+    if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+        # The in-game menu, driven through its own keystroke API. No window and
+        # no ImGui context: the actions live in OnKey, not Draw.
+        add_executable(moderngekko_menu_test tests/menu_test.cpp)
+        target_include_directories(moderngekko_menu_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core")
+        target_compile_features(moderngekko_menu_test PRIVATE cxx_std_23)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            target_compile_definitions(moderngekko_menu_test PRIVATE _ARCH_64=1)
+        else()
+            target_compile_definitions(moderngekko_menu_test PRIVATE _ARCH_32=1)
+        endif()
+        if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+            target_link_libraries(moderngekko_menu_test PRIVATE
+                "$<LINK_LIBRARY:WHOLE_ARCHIVE,moderngekko>" core uicommon videocommon)
+        elseif(UNIX AND NOT APPLE)
+            target_link_libraries(moderngekko_menu_test PRIVATE
+                "-Wl,--whole-archive" moderngekko "-Wl,--no-whole-archive"
+                core uicommon videocommon)
+        else()
+            target_link_libraries(moderngekko_menu_test PRIVATE
+                ModernGekko::Runtime core uicommon videocommon)
+        endif()
+        add_test(NAME moderngekko.menu COMMAND moderngekko_menu_test)
+    endif()
+
     add_executable(moderngekko_game_inspect_test tests/game_inspect_test.cpp)
     target_link_libraries(moderngekko_game_inspect_test PRIVATE ModernGekko::LegacyRuntime)
     add_test(NAME moderngekko.game_inspect COMMAND moderngekko_game_inspect_test)

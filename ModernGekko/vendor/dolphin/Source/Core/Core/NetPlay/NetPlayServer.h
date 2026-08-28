@@ -198,6 +198,11 @@ private:
 
   SyncIdentifier m_selected_game_identifier;
   std::string m_selected_game_name;
+  // Captured when the server is constructed, not read per-connection: the host
+  // is playing one game for the life of the session, and a copy is also what
+  // lets a test give the two sides different identities inside one process.
+  std::string m_game_disc_id;
+  std::string m_game_fingerprint;
   std::thread m_thread;
   Common::Event m_chunked_data_event;
   Common::Event m_chunked_data_complete_event;

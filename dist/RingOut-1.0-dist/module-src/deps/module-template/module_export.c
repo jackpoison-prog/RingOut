@@ -8,7 +8,14 @@
 
 #include "StaticRecompABI.h"
 
-static int chassis_dispatch(CPUState* ctx, u32 address)
+// NOT static, deliberately. LLVM keys an internal-linkage function in a PGO
+// profile as "<source path>;<symbol>", using the path as the compiler received
+// it -- so a static function's counts are recorded under the TRAINING machine's
+// absolute path and match nothing on anyone else's, silently. External linkage
+// makes the key the bare symbol, which is the same everywhere. Visibility is
+// hidden module-wide, so nothing leaves the .so either way.
+int chassis_dispatch(CPUState* ctx, u32 address);
+int chassis_dispatch(CPUState* ctx, u32 address)
 {
     const int result = dolrecomp_call(ctx, address);
     // Lazy FPRF: classification is deferred while native code runs, so
@@ -20,7 +27,8 @@ static int chassis_dispatch(CPUState* ctx, u32 address)
     return result;
 }
 
-static void chassis_on_state_loaded(CPUState* ctx)
+void chassis_on_state_loaded(CPUState* ctx);
+void chassis_on_state_loaded(CPUState* ctx)
 {
     // The loaded FPSCR is authoritative; anything left pending belongs to the
     // session being discarded and would overwrite it at the next flush.

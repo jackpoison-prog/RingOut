@@ -25,7 +25,7 @@ OUT="${OUT:-$REPO/dist}"
 # working package directory, which keeps its historical RingOut-1.0-* name:
 # that is 1.3 GB of developer state referenced by .gitignore and a dozen
 # scripts, and renaming it would churn all of them for nothing a player sees.
-VERSION="${VERSION:-1.3}"
+VERSION="${VERSION:-1.1}"
 PKG="RingOut-1.0-dist"
 SRC="$REPO/dist/$PKG"
 WORK="$OUT/_dist-stage"
@@ -64,6 +64,11 @@ install -m 755 "$SRC/tools/dolrecomp"     "$STAGE/tools/dolrecomp"
 # rather than a second copy that drifts -- this project has been bitten by
 # exactly that with dolrecomp-src.
 install -m 755 "$REPO/dist/shared/gc-art.py" "$STAGE/tools/gc-art.py"
+# The route setup.sh --pgo plays to train a profile. Sourced from the same file
+# every perf A/B in this project used, so the profile is trained on the workload
+# the numbers were measured on -- a second copy would drift and nobody would
+# notice, because a wrong route still produces a valid-looking profile.
+install -m 644 "$REPO/.github/input-scripts/arcade-match.txt" "$STAGE/tools/train-route.txt"
 for f in "$SRC"/shaders/*.glsl; do install -m 644 "$f" "$STAGE/shaders/"; done
 
 # bin/g<ID>_recomp.so is deliberately absent: it is recompiled from the user's
@@ -77,6 +82,29 @@ echo "    $(ls "$STAGE/lib" | wc -l) libraries, $(ls "$STAGE/libc-fallback" | wc
 echo "==> module sources"
 cp -a "$SRC/module-src" "$STAGE/module-src"
 
+# PER-REGION PGO PROFILES. One per disc ID, ~11 MB each, and setup.sh picks by
+# the ID it read from the disc. Worth the size: a matching profile is -13.50%
+# cycles against none, while ANOTHER region's profile is -1.34% and lowers IPC
+# below an unprofiled build. Measured 2026-08-26, 3 arms x 3 reps.
+#
+# Asserted rather than assumed, because a profile is a silent dependency: a
+# missing one costs ~12% and nothing warns, which is exactly how the desktop
+# package shipped stale codegen twice before.
+if [ -d "$STAGE/module-src/profiles" ]; then
+  echo "==> pgo profiles"
+  for prof in "$STAGE/module-src/profiles"/*.profdata; do
+    [ -e "$prof" ] || continue
+    id="$(basename "$prof" .profdata)"
+    case "$id" in
+      GRS[EJP]A[FS]) ;;
+      *) echo "  FAIL: $id is not a disc ID this game ships as" >&2; exit 1 ;;
+    esac
+    echo "    $id: $(du -h "$prof" | cut -f1)"
+  done
+else
+  echo "==> pgo profiles: NONE -- every disc builds unprofiled, ~12% slower" >&2
+fi
+
 # The cheat/game-settings ini is authored by this project (USA Action Replay
 # codes; Dolphin ships only the PAL ini), not disc-derived. Take it from the
 # canonical location rather than the working package's own
@@ -87,40 +115,12 @@ cp -a "$SRC/module-src" "$STAGE/module-src"
 #
 # Nothing ELSE from userdata/ goes: the rest is the developer's Dolphin config,
 # cache, logs and memory card, and config.ini there names a LAN address.
-GAMESETTINGS=""
-for cand in "$SRC/userdata/GameSettings/GRSEAF.ini" \
-            "$REPO/work/mg_userdir/GameSettings/GRSEAF.ini"; do
-  [ -s "$cand" ] && { GAMESETTINGS="$cand"; break; }
-done
-if [ -n "$GAMESETTINGS" ]; then
-  mkdir -p "$STAGE/userdata/GameSettings"
-  install -m 644 "$GAMESETTINGS" "$STAGE/userdata/GameSettings/GRSEAF.ini"
-  # SHIP THE CODE LIST WITH NOTHING ENABLED, whatever the developer's working
-  # copy happens to have on. That file's own header promises "Codes are listed
-  # but NOT enabled by default", and it is a working config: v1.2 shipped with
-  # five codes marked enabled -- Infinite Time, both Infinite Healths and P2 Play
-  # As Inferno -- because they were on locally. Latent rather than broken, since
-  # no Dolphin.ini ships and EnableCheats defaults off, but the first player to
-  # turn cheats on would get unendable matches against a forced Inferno.
-  # Stripping here rather than editing the working copy keeps the release
-  # independent of local state, like the art/ and userdata/ rules.
-  python3 - "$STAGE/userdata/GameSettings/GRSEAF.ini" <<'STRIP'
-import re, sys
-path = sys.argv[1]
-text = open(path).read()
-# Empty every enabled section, leaving the sections themselves in place so the
-# CHEATS tab still has somewhere to write.
-cleaned = re.sub(r"(\[(?:ActionReplay|Gecko)_Enabled\]\n)(?:\$[^\n]*\n)*",
-                 r"\1", text)
-open(path, "w").write(cleaned)
-enabled = [l for l in cleaned.splitlines()
-           if l.startswith("$") and False]  # nothing should remain enabled
-print(f"  enabled codes after strip: {len(enabled)}")
-STRIP
-  echo "==> game settings: $(basename "$(dirname "$(dirname "$GAMESETTINGS")")")/GameSettings/GRSEAF.ini"
-else
-  echo "==> game settings: NONE FOUND -- the CHEATS tab will be empty" >&2
-fi
+# One shared stager, so the deck packager cannot drift from this one -- same
+# reason gc-art.py lives in dist/shared/. It resolves the USA ini this project
+# authored and the PAL ini Dolphin ships, and refuses to stage a list with any
+# code left enabled.
+echo "==> game settings"
+"$REPO/dist/shared/stage-gamesettings.sh" "$REPO" "$STAGE/userdata/GameSettings"
 
 if [ "${SKIP_SOURCE:-0}" != "1" ]; then
   echo "==> GPL source shipment"
@@ -213,15 +213,36 @@ rt_ts="$(stat -c %Y "$SRC/bin/moderngekko-run")"
 abi_ts="$(stat -c %Y "$ABI_PKG")"
 if [ "$rt_ts" -lt "$abi_ts" ]; then
   echo "  FAIL: bin/moderngekko-run ($(date -d "@$rt_ts" +%F)) predates the ABI" >&2
-  echo "        header ($(date -d "@$abi_ts" +%F)). Rebuild the runtime:" >&2
-  echo "          cmake -S ModernGekko -B build-dist-native -GNinja \\" >&2
-  echo "            -DCMAKE_BUILD_TYPE=Release -DENABLE_QT=OFF -DENABLE_TESTS=OFF \\" >&2
-  echo "            -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF" >&2
-  echo "          cmake --build build-dist-native --target moderngekko-run" >&2
-  echo "          cp build-dist-native/moderngekko-run $SRC/bin/" >&2
+  echo "        header ($(date -d "@$abi_ts" +%F)). Rebuild the runtime IN THE" >&2
+  echo "        CONTAINER -- a native build here raises the shipped glibc floor" >&2
+  echo "        from 2.36 to whatever this machine has, silently, and it starts" >&2
+  echo "        on nothing older:" >&2
+  echo "          .github/scripts/build-deck.sh" >&2
+  echo "        or, with the image already built:" >&2
+  echo "          podman run --rm --userns=keep-id -v $REPO:/src:Z -w /src \\" >&2
+  echo "            ringout-deck-build cmake --build build-deck --target moderngekko-run" >&2
+  echo "          cp build-deck/moderngekko-run $SRC/bin/" >&2
+  echo "        Check it afterwards:" >&2
+  echo "          objdump -T <binary> | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1" >&2
   exit 1
 fi
 echo "  runtime is newer than the ABI header"
+
+# The launcher's NEED_GLIBC decides when it switches to the bundled glibc, and
+# the bundled path is the one that breaks Mesa. It said 2.44 while the shipped
+# runtime needed 2.36, so every host between those took the bad path for no
+# reason -- a Deck on 2.41 among them. Assert rather than trust.
+launcher_need="$(grep -m1 '^NEED_GLIBC=' "$SRC/RingOut" | cut -d= -f2)"
+runtime_floor="$(objdump -T "$SRC/bin/moderngekko-run" 2>/dev/null |
+                 grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+if [ -n "$runtime_floor" ] && [ "$launcher_need" != "$runtime_floor" ]; then
+  echo "  FAIL: RingOut says NEED_GLIBC=$launcher_need but bin/moderngekko-run" >&2
+  echo "        actually needs $runtime_floor. Hosts between the two would take" >&2
+  echo "        the bundled-glibc path, which is the one that breaks Mesa." >&2
+  echo "        Fix: set NEED_GLIBC=$runtime_floor in $SRC/RingOut" >&2
+  exit 1
+fi
+echo "  launcher glibc floor matches the runtime ($runtime_floor)"
 
 # A recompiler older than the emitter it was built from ships OLD CODEGEN, and
 # nothing downstream notices: setup.sh runs, the module builds, the game plays.

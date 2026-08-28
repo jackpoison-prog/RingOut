@@ -148,6 +148,14 @@ if [ -d "$HERE/shaders" ]; then
     cp -n "$HERE/shaders"/*.glsl "$USER_DIR/Shaders/" 2>/dev/null || true
 fi
 
+# Cheat lists, same pattern: shipped read-only beside the launcher, installed
+# where Dolphin reads game inis. -n so codes you have enabled, or codes you have
+# added yourself, survive an update -- the CHEATS tab writes to this copy.
+if [ -d "$HERE/gamesettings" ]; then
+    mkdir -p "$USER_DIR/GameSettings"
+    cp -n "$HERE/gamesettings"/*.ini "$USER_DIR/GameSettings/" 2>/dev/null || true
+fi
+
 # Seed the frontend config before the runtime can, because the runtime's own
 # default is wrong for this machine: it writes resolution=1920x1080, which is
 # EFB scale 3 -- a 1920x1584 render target. The Deck's panel is 1280x800, and
@@ -174,7 +182,21 @@ buffer=auto
 CONFIG
 fi
 
-MODULE="$(ls "$HERE"/bin/g*_recomp.so 2>/dev/null | head -1)"
+# Pick the module that MATCHES the disc in game/, not whatever sorts first.
+# With a US and a PAL module both present, `ls | head -1` chose gGRSEAF while
+# game/ held PAL -- a mismatch the runtime then rejects, for reasons no player
+# could be expected to work out. Build a second region and you had it.
+DISC_ID="$(head -c 6 "$HERE/game/sys/boot.bin" 2>/dev/null || true)"
+MODULE=""
+if [ -n "$DISC_ID" ] && [ -f "$HERE/bin/g${DISC_ID}_recomp.so" ]; then
+    MODULE="$HERE/bin/g${DISC_ID}_recomp.so"
+else
+    MODULE="$(ls "$HERE"/bin/g*_recomp.so 2>/dev/null | head -1)"
+    if [ -n "$MODULE" ] && [ -n "$DISC_ID" ]; then
+        echo "Ring Out: no module for $DISC_ID; trying $(basename "$MODULE")." >&2
+        echo "          If this fails, build one from your disc -- see README.txt." >&2
+    fi
+fi
 if [ -z "$MODULE" ]; then
     echo "No recompiled module in bin/. This package is incomplete." >&2
     exit 1

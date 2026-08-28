@@ -24,6 +24,8 @@
 //     captured from the OnConnectionError callback instead.
 
 #include "netplay_session.hpp"
+#include <ctime>
+#include <fstream>
 
 #include "Core/Boot/Boot.h"
 #include "Core/Config/MainSettings.h"
@@ -37,6 +39,7 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "UICommon/GameFile.h"
 #include "UICommon/UICommon.h"
+#include "netplay_compatibility.hpp"
 #include "runtime/dolphin_runtime_internal.hpp"
 
 #include <SDL3/SDL.h>
@@ -64,9 +67,44 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// Netplay writes to a FILE as well as stderr. A player who launched from Steam
+// -- which is how the Deck package is meant to be run -- has no terminal, so
+// every explanation this session produces was going nowhere. Issue #2 arrived
+// as a PHOTOGRAPH of a dialog because that was the only way to report what
+// happened.
+std::mutex g_log_mutex;
+std::ofstream g_log_file;
+std::filesystem::path g_log_path;
+
+void OpenSessionLog(const std::filesystem::path &user_directory) {
+  std::error_code ec;
+  const auto dir = user_directory / "Logs";
+  std::filesystem::create_directories(dir, ec);
+  std::lock_guard<std::mutex> guard(g_log_mutex);
+  // Appended, not truncated: "it failed three times and here is each one" is
+  // the report worth having, and a session that dies early would otherwise
+  // erase the one before it.
+  g_log_file.open(dir / "netplay.log", std::ios::app);
+  g_log_path = dir / "netplay.log";
+  if (g_log_file) {
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    char stamp[32] = {};
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+    g_log_file << "\n==== netplay session " << stamp << " ====\n";
+    g_log_file.flush();
+  }
+}
+
+const std::filesystem::path &SessionLogPath() { return g_log_path; }
+
 void Log(const std::string &message) {
   std::cerr << "netplay: " << message << '\n';
   std::cerr.flush();
+  std::lock_guard<std::mutex> guard(g_log_mutex);
+  if (g_log_file) {
+    g_log_file << message << '\n';
+    g_log_file.flush();   // flushed per line: a crash must not eat the reason
+  }
 }
 
 // Bridges Dolphin's netplay callbacks to a headless session. Every method is
@@ -119,9 +157,13 @@ public:
 
   void AppendChat(const std::string &msg) override { Log("chat: " + msg); }
 
-  void OnMsgChangeGame(const NetPlay::SyncIdentifier &,
+  void OnMsgChangeGame(const NetPlay::SyncIdentifier &sync_identifier,
                        const std::string &name) override {
-    Log("game selected: " + name);
+    // With the disc ID, not just the name. All three regions of this game call
+    // themselves SOULCALIBUR2 internally, so the name alone reads identically
+    // whether the host is on GRSEAF, GRSJAF or GRSPAF -- which is exactly the
+    // case a player needs to see, since those cannot play together.
+    Log("game selected: " + name + " (" + sync_identifier.game_id + ")");
   }
 
   void OnMsgChangeGBARom(int, const NetPlay::GBAConfig &) override {}
@@ -406,6 +448,43 @@ enum class PortErrorChoice {
 // process instead, with the reason on a stderr nobody is reading, is a dead end
 // from a menu-launched session: the game is already torn down, so there is
 // nothing to fall back to.
+// Shows WHY a connection failed, on screen, and says where the log is.
+//
+// Before this, a rejected connection closed the lobby and left nothing behind:
+// the reason went to stderr, which a player launching from Steam never sees.
+// That is the difference between "it doesn't work" and "the host is on a
+// different disc" -- and the second one a player can act on.
+void ShowConnectError(WindowSystem window_system, const std::string &reason,
+                      const std::filesystem::path &log_path) {
+  LobbyWindow window;
+  if (!window.Open(window_system))
+    return;   // headless or no display: the caller has already logged it
+
+  const auto deadline = Clock::now() + std::chrono::seconds(30);
+  while (Clock::now() < deadline) {
+    if (!window.Frame())
+      break;
+    const ImGuiViewport *viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImGui::Begin("Netplay", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f), "Could not join the session.");
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", reason.c_str());
+    ImGui::Spacing();
+    if (!log_path.empty())
+      ImGui::TextDisabled("Details: %s", log_path.string().c_str());
+    ImGui::Spacing();
+    if (ImGui::Button("Close", ImVec2(140, 40)))
+      break;
+    ImGui::End();
+    window.Present();
+  }
+  window.Close();
+}
+
 PortErrorChoice ShowPortError(WindowSystem window_system, std::uint16_t port,
                               const std::string &address) {
   LobbyWindow window;
@@ -728,6 +807,8 @@ int RunNetplayLobby(RuntimeConfig runtime_config, ConfigResult frontend_config,
 
   Log("initializing Dolphin services");
   UICommon::SetUserDirectory(runtime_config.user_directory.string());
+  // Opened here, before anything can fail: every line below reaches the file.
+  OpenSessionLog(runtime_config.user_directory);
   UICommon::Init();
   detail::SetExternalUICommon(true);
 
@@ -816,6 +897,15 @@ int RunNetplayLobby(RuntimeConfig runtime_config, ConfigResult frontend_config,
     return static_cast<int>(NetplayExitCode::InvalidConfiguration);
   }
 
+  // Agreed at connect time, before a lobby exists to stall in. Both peers
+  // compute this from their own disc and module; the host rejects a peer whose
+  // disc ID differs (a JP or PAL copy against a US host) or whose fingerprint
+  // does -- same disc, module built by different tools. Without it the mismatch
+  // surfaced as a 30-second wait and "no start signal arrived", which told the
+  // joining player nothing about what was wrong.
+  NetPlay::SetGameIdentity(inspected.metadata->disc_id,
+                           CompatibilityFingerprint(runtime_config, *inspected.metadata));
+
   SessionUI ui(game);
   const NetPlay::NetTraversalConfig direct{};
   std::unique_ptr<NetPlay::NetPlayServer> server;
@@ -882,11 +972,27 @@ int RunNetplayLobby(RuntimeConfig runtime_config, ConfigResult frontend_config,
   if (!client->IsConnected()) {
     const std::string error = ui.Error();
     Log(error.empty() ? "could not connect to the host" : error);
+    // A rejected handshake is not an unreachable host, and a script that
+    // retries on HostUnavailable would retry this one forever. The reason text
+    // is what the client's error path produced, so match on what it says about
+    // the game rather than inventing a second channel for it.
+    const bool mismatch = error.find("different game") != std::string::npos ||
+                          error.find("differently built") != std::string::npos;
+    // On screen, not just in the log: this is the moment the player is standing
+    // there wondering why nothing happened.
+    if (!runtime_config.headless) {
+      ShowConnectError(runtime_config.window_system,
+                       error.empty() ? "The host did not respond. Check the address, the port, "
+                                       "and that the host has started the session."
+                                     : error,
+                       SessionLogPath());
+    }
     client.reset();
     server.reset();
     detail::SetExternalUICommon(false);
     UICommon::Shutdown();
-    return static_cast<int>(NetplayExitCode::HostUnavailable);
+    return static_cast<int>(mismatch ? NetplayExitCode::CompatibilityMismatch
+                                     : NetplayExitCode::HostUnavailable);
   }
   Log("connected as '" + options.nickname + "'");
 

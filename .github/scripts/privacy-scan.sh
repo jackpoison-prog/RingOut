@@ -39,11 +39,31 @@ DIR="${1:?usage: privacy-scan.sh <staged-package-dir>}"
 ALLOW='ALL\.Net|CyCraft|Key of Avalon|MarioKart|namcam|github\.com/jackpoison-prog|/home/deck|/home/user\b'
 [ -n "${PRIVACY_EXTRA_ALLOW:-}" ] && ALLOW="$ALLOW|$PRIVACY_EXTRA_ALLOW"
 
+# Where this repository is checked out, regex-escaped. BUILD_ROOT= overrides it
+# for a stage assembled elsewhere.
+BUILD_ROOT="${BUILD_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)}"
+BUILD_ROOT_RE=""
+if [ -n "$BUILD_ROOT" ] && [ "$BUILD_ROOT" != "/" ]; then
+  # '/' is not a regex metacharacter; escaping it makes grep warn
+  # "stray \ before /" once per file scanned.
+  BUILD_ROOT_RE="$(printf '%s' "$BUILD_ROOT" | sed 's/[][\.*^$(){}?+|]/\\&/g')"
+fi
+
 # Two tiers, because the same string means different things in different files.
 #
 # ALWAYS: a build path, an author email or a credential is the builder's data
 # wherever it turns up, including compiled into a binary -- that is precisely
 # how this project's known leak travelled.
+#
+# THE BUILDER'S OWN CHECKOUT PATH is in here too, derived rather than listed.
+# The home-path patterns below only catch a leak that happens to live under
+# /home or /Users; this project's checkout is at /mnt/... and sailed through
+# every scan for three releases. It is still shipping inside the three PGO
+# profiles, because LLVM keys a static function as "<source path>;<symbol>" and
+# that is inherent to the format -- three strings per profile, naming a
+# directory layout and a mount, no username. Deriving the pattern from wherever
+# this script lives means the check works on any machine that cuts a release,
+# including one whose checkout is somewhere neither of us predicted.
 PATTERNS_ALWAYS=(
   '/home/[a-z0-9_-]+/'            # linux home paths
   '/Users/[A-Za-z0-9_-]+/'        # macOS home paths
@@ -114,10 +134,7 @@ while IFS= read -r f; do
   esac
 
   pats=("${PATTERNS_ALWAYS[@]}")
-  if ! head -c 4 "$f" 2>/dev/null | grep -q $'\x7fELF' && \
-     file -b "$f" 2>/dev/null | grep -qiE 'text|json|xml|ini|script'; then
-    pats+=("${PATTERNS_TEXT[@]}")
-  fi
+  [ -n "$BUILD_ROOT_RE" ] && pats+=("$BUILD_ROOT_RE")
 
   for p in "${pats[@]}"; do
     m="$(strings -a "$f" 2>/dev/null | grep -aE "$p" | grep -avE "$ALLOW" |

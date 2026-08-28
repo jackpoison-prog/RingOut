@@ -247,6 +247,11 @@ bool NetPlayClient::Connect()
   packet << Common::GetScmRevGitStr();
   packet << Common::GetNetplayDolphinVer();
   packet << m_player_name;
+  // What we are about to play, so the host can reject a mismatch at connect
+  // time rather than letting the lobby stall with nothing said. Appended last:
+  // the server returns early on a version mismatch and never reads these.
+  packet << NetPlay::GetGameDiscId();
+  packet << NetPlay::GetGameFingerprint();
   Send(packet);
   enet_host_flush(m_client);
   sf::Packet rpac;
@@ -278,6 +283,16 @@ bool NetPlayClient::Connect()
     {
     case ConnectionError::ServerFull:
       m_dialog->OnConnectionError(_trans("The server is full."));
+      break;
+    case ConnectionError::DifferentGame:
+      m_dialog->OnConnectionError(
+          _trans("The host is playing a different game. Both players need the same disc: "
+                 "a Japanese or European copy cannot join a session hosted from a US one."));
+      break;
+    case ConnectionError::CompatibilityMismatch:
+      m_dialog->OnConnectionError(
+          _trans("The host has the same game but a differently built copy of it. Both players "
+                 "need a module recompiled by the same version of the tools."));
       break;
     case ConnectionError::VersionMismatch:
       m_dialog->OnConnectionError(

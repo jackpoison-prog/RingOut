@@ -5,7 +5,7 @@
 # game-derived ships with this package -- this script extracts the disc and
 # recompiles its executable here, on your machine.
 #
-# Usage:  ./setup.sh [--deck] /path/to/your/disc.iso
+# Usage:  ./setup.sh [--deck] [--pgo] [-y] /path/to/your/disc.iso
 #
 #   --deck   build a module that will also run on a Steam Deck, which you then
 #            copy into the Deck package. See "THE DECK BUILD" below.
@@ -32,18 +32,35 @@ DEPS="$HERE/module-src/deps"
 # for this machine, which is faster and right for playing here.
 DECK=0
 ISO=""
+PGO=0
+ASSUME_YES=0
 for arg in "$@"; do
     case "$arg" in
         --deck) DECK=1 ;;
+        --pgo)  PGO=1 ;;
+        -y|--yes) ASSUME_YES=1 ;;
         *)      [ -z "$ISO" ] && ISO="$arg" ;;
     esac
 done
+# --pgo adds a fourth stage. Counted from the flag rather than written into each
+# label, so the run that trains a profile does not announce "3/3" and then go on
+# to do a fourth thing -- which is what it did the first time this was run.
+if [ "$PGO" = 1 ]; then NSTAGES=4; else NSTAGES=3; fi
+
+# Filled in as the build goes, and reported in one block at the very end. A
+# profile that was silently not used is the single most likely thing to go
+# unnoticed here: it costs 10-14% and looks exactly like a normal build.
+PGO_STATE="none"          # none | shipped | self-trained
+PGO_WHY=""                # why not, in the player's words
 
 if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
-    echo "Usage: ./setup.sh [--deck] /path/to/your/disc.iso"
+    echo "Usage: ./setup.sh [--deck] [--pgo] [-y] /path/to/your/disc.iso"
     echo
     echo "Supply a GameCube disc image you already have."
     echo "  --deck   build a module that also runs on a Steam Deck"
+    echo "  --pgo    train a profile on YOUR clang and rebuild with it"
+    echo "           (one-time; ~11 min extra on a desktop; worth 10-14%)"
+    echo "  -y       skip the preflight confirmation and just build"
     exit 1
 fi
 
@@ -112,9 +129,145 @@ if [ -z "$CC" ]; then
 fi
 echo "Using C compiler: $CC"
 
-echo "==> 1/3  Extracting disc"
+# ---------------------------------------------------------------------------
+# PREFLIGHT. What is here, what is not, and what each absence costs -- BEFORE
+# spending 20 minutes finding out. Everything below was a mid-build surprise at
+# some point: a clang that could not read the profile, an llvm-profdata that
+# was not installed until after the counts were collected, a training run with
+# no save data to get past the memory-card screen.
+# ---------------------------------------------------------------------------
+row() { printf "    %-16s %-26s %s\n" "$1" "$2" "$3"; }
+
+# The disc ID decides which profile applies, so read it now if the format lets
+# us. A plain .iso/.gcm starts with it; .rvz/.gcz are compressed, so those wait
+# for the extract step and say so rather than guessing.
+PRE_ID="$(head -c 6 "$ISO" 2>/dev/null | tr -dc 'A-Z0-9')"
+case "$PRE_ID" in
+    G?????) ;;
+    *) PRE_ID="" ;;
+esac
+
+echo
+echo "==> Preflight"
+row "compiler" "$("$CC" --version 2>&1 | head -1 | cut -c1-26)" "OK"
+row "cmake" "$(cmake --version 2>/dev/null | head -1 | cut -d' ' -f3)" "OK"
+row "ninja" "$(ninja --version 2>/dev/null)" "OK"
+FREE_GB="$(df -BG --output=avail "$HERE" 2>/dev/null | tail -1 | tr -dc '0-9')"
+if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt 5 ]; then
+    row "free space" "${FREE_GB}G" "TIGHT -- needs about 5G"
+else
+    row "free space" "${FREE_GB:-?}G" "OK"
+fi
+row "disc image" "${PRE_ID:-read at extract time}" "OK"
+
+# Optional things. None of these stop the build; each one costs something
+# specific, and the point of naming them here is that you can fix them now
+# instead of after the build.
+PRE_PROFDATA="$(command -v llvm-profdata 2>/dev/null || true)"
+if [ -z "$PRE_PROFDATA" ]; then
+    for c in "$(dirname "$CC")"/llvm-profdata*; do
+        [ -x "$c" ] && PRE_PROFDATA="$c" && break
+    done
+fi
+# `|| true` again, and for the same reason as the draws check below: a released
+# package ships NO userdata/GC, so find exits non-zero, pipefail propagates it
+# and set -e kills setup before it builds anything. Caught by running the actual
+# zip -- the staged tree used during development had a save card in it and
+# sailed through.
+PRE_SAVE="$( { find "$HERE/userdata/GC" \( -name '*.gci' -o -name '*.raw' \) 2>/dev/null || true; } | head -1)"
+PRE_IS_CLANG=0
+"$CC" --version 2>&1 | grep -qi clang && PRE_IS_CLANG=1
+
+# Does the shipped profile exist for this disc, and can this clang read it?
+# Probed, not assumed -- the answer is no on every clang older than 22, which
+# is most of them, and it is the single largest thing this check exists to say.
+PRE_PROF=""
+[ -n "$PRE_ID" ] && [ -f "$HERE/module-src/profiles/$PRE_ID.profdata" ] &&
+    PRE_PROF="$HERE/module-src/profiles/$PRE_ID.profdata"
+if [ "$PRE_IS_CLANG" = 1 ] && [ -n "$PRE_PROF" ]; then
+    if echo 'int main(void){return 0;}' |
+       "$CC" -x c - -fprofile-use="$PRE_PROF" -o /dev/null >/dev/null 2>&1; then
+        row "shipped profile" "readable by your clang" "OK -- 10-14% faster"
+    else
+        row "shipped profile" "TOO NEW for your clang" "costs 10-14%; --pgo fixes it"
+    fi
+elif [ "$PRE_IS_CLANG" != 1 ]; then
+    row "shipped profile" "needs clang" "costs 10-14%"
+elif [ -n "$PRE_ID" ]; then
+    row "shipped profile" "none ships for $PRE_ID" "costs 10-14%; --pgo fixes it"
+else
+    row "shipped profile" "checked after extract" "-"
+fi
+
+if [ "$PGO" = 1 ]; then
+    if [ -n "$PRE_PROFDATA" ]; then
+        row "llvm-profdata" "$(basename "$PRE_PROFDATA")" "OK -- needed by --pgo"
+    else
+        row "llvm-profdata" "NOT INSTALLED" "--pgo cannot merge counts"
+    fi
+    if [ -n "$PRE_SAVE" ]; then
+        row "save data" "found" "OK -- training needs it"
+    else
+        row "save data" "NONE in userdata/GC" "training will not reach a match"
+    fi
+fi
+command -v lld >/dev/null 2>&1 ||
+    row "lld" "not installed" "no effect -- measured at 0.1%"
+
+# Anything above that would waste the run, said again as a warning rather than
+# left for the reader to spot in a table.
+PRE_WARN=""
+if [ "$PGO" = 1 ] && [ -z "$PRE_PROFDATA" ]; then
+    PRE_WARN="$PRE_WARN\n    --pgo needs llvm-profdata. Arch: sudo pacman -S llvm"
+fi
+if [ "$PGO" = 1 ] && [ -z "$PRE_SAVE" ]; then
+    PRE_WARN="$PRE_WARN\n    --pgo has no save data to train with: the game parks on the"
+    PRE_WARN="$PRE_WARN\n    memory-card screen and the profile is refused (measured: 2.4"
+    PRE_WARN="$PRE_WARN\n    draws/frame there against 84 in a match). Play once, then re-run."
+fi
+if [ -n "$PRE_WARN" ]; then
+    echo
+    echo "  Heads up before you spend the time:"
+    printf '%b\n' "$PRE_WARN"
+fi
+
+# The prompt only exists where someone can answer it. The launcher runs this in
+# a terminal, but it is also run from scripts and piped, and a setup that blocks
+# forever on a question nobody sees is worse than one that just builds.
+if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
+    echo
+    printf "  Start the build? [Y/n] "
+    read -r _answer || _answer=""
+    case "$_answer" in
+        [Nn]*) echo "  Stopped. Nothing was changed."; exit 0 ;;
+    esac
+fi
+
+echo "==> 1/$NSTAGES  Extracting disc"
 rm -rf "$HERE/game"
-"$HERE/tools/dolrecomp" extract "$ISO" "$HERE/game"
+# Two extractors, and the second one reads more than the first.
+#
+# tools/dolrecomp handles .iso, .gcm and .wbfs. The launcher's file picker has
+# always ALSO offered .rvz and .gcz, and for those the old path stopped dead at
+# "unsupported format: only .iso and .wbfs are supported" -- after the player
+# had already chosen their disc, with no suggestion of what to do next.
+#
+# bin/moderngekko-run reads all of them, because it carries Dolphin's DiscIO
+# and always did; nothing here was reachable from this step until now. Its
+# output is byte-identical to the recompiler's on a disc both can read (checked
+# file by file, system files and all three multi-hundred-MB archives).
+#
+# The recompiler stays first so the common .iso path is unchanged, and the
+# fallback covers the rest rather than replacing anything.
+if ! "$HERE/tools/dolrecomp" extract "$ISO" "$HERE/game" 2>/dev/null; then
+    echo "    (that format needs the runtime's extractor -- using it)"
+    if ! "$HERE/bin/moderngekko-run" --extract "$ISO" "$HERE/game"; then
+        echo
+        echo "Could not read $ISO as a GameCube disc image."
+        echo "Supported: .iso .gcm .wbfs .rvz .gcz .wia and NKit variants of those."
+        exit 1
+    fi
+fi
 
 DISC_ID="$(head -c 6 "$HERE/game/sys/boot.bin" 2>/dev/null || true)"
 if [ -z "$DISC_ID" ]; then
@@ -123,7 +276,7 @@ if [ -z "$DISC_ID" ]; then
 fi
 echo "    disc id: $DISC_ID"
 
-echo "==> 2/3  Recompiling the game executable (several minutes)"
+echo "==> 2/$NSTAGES  Recompiling the game executable (several minutes)"
 rm -rf "$HERE/work"
 mkdir -p "$HERE/work"
 # --idle-pc is not optional. Loop back-edges are compiled as native gotos, which
@@ -142,7 +295,7 @@ mkdir -p "$HERE/work"
 # gen_module_tables.py reads main.dol from alongside the generated sources.
 cp "$HERE/game/sys/main.dol" "$HERE/work/out/generated/main.dol"
 
-echo "==> 3/3  Building the module"
+echo "==> 3/$NSTAGES  Building the module"
 # Profile-guided optimisation, when a profile ships beside the sources and the
 # compiler we found is clang. Worth -11.9% CPU cycles and 54.5 -> 59.6 fps on a
 # real match (measured 2026-08-12; see module-src/CMakeLists.txt for the full
@@ -153,11 +306,60 @@ echo "==> 3/3  Building the module"
 # the functions as unprofiled and optimises them normally -- and a profile this
 # clang cannot read is skipped rather than fatal. Both cases are handled in the
 # CMakeLists, which probes before committing to the flag.
+# PROFILE-GUIDED BUILD, PICKED BY DISC ID.
+#
+# A chunk function is named for its guest address, so a profile only fits the
+# disc it was trained on. Measured 2026-08-26 on a Japanese module, 3 arms x 3
+# reps over 24000 frames of a real match, all arms hashing identically:
+#
+#     no profile      806.50 Gcyc              IPC 2.512
+#     US profile      795.68 Gcyc   -1.34%     IPC 2.450
+#     matching one    697.58 Gcyc  -13.50%     IPC 2.640
+#
+# A MISMATCHED profile is worse than no profile for IPC -- clang has no usable
+# counts and inlines blind, producing a bigger, slower module. The 1.34% it
+# still buys comes from the runtime helpers, whose names do not move between
+# regions. So: use the profile for THIS disc, and if there is not one, use none.
 PGO_ARGS=()
-if [ -f "$HERE/module-src/module.profdata" ] && "$CC" --version 2>&1 | grep -qi clang; then
-    PGO_ARGS=(-DMODULE_PGO_PROFILE="$HERE/module-src/module.profdata")
-    echo "    profile-guided build (this takes longer, and is worth it)"
+PROFILE=""
+if "$CC" --version 2>&1 | grep -qi clang; then
+    if [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
+        PROFILE="$HERE/module-src/profiles/$DISC_ID.profdata"
+    elif [ "$DISC_ID" = "GRSEPS" ] && [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ]; then
+        # SC2 Plus, the community mod. It appends its own code at 0x80476000 and
+        # hooks the base text IN PLACE rather than relocating it, so its chunks
+        # are the US disc's chunks and the US profile is the right one -- which
+        # is also what this script gave it before profiles were split per disc.
+        # Not separately benchmarked, unlike the three stock regions; it is kept
+        # on the US profile because dropping it to none would be a silent
+        # regression for those players.
+        PROFILE="$HERE/module-src/profiles/GRSEAF.profdata"
+    elif [ -f "$HERE/module-src/module.profdata" ] && [ "$DISC_ID" = "GRSEAF" ]; then
+        # The original single-profile layout, kept so an older package or a
+        # hand-assembled tree still builds the way it always did.
+        PROFILE="$HERE/module-src/module.profdata"
+    fi
 fi
+if [ -n "$PROFILE" ]; then
+    PGO_ARGS=(-DMODULE_PGO_PROFILE="$PROFILE")
+    echo "    profile-guided build for $DISC_ID (this takes longer, and is worth it)"
+else
+    # Deliberately NOT falling back to another region's profile: measured above,
+    # that is worse than building without one.
+    echo "    no profile ships for $DISC_ID, so this builds without one."
+    echo "    Your module is correct; a profiled build is 10-14% faster."
+    [ "$PGO" = 1 ] || echo "    ./setup.sh --pgo would train one here (~11 min extra, once)."
+    if "$CC" --version 2>&1 | grep -qi clang; then
+        PGO_WHY="no profile ships for $DISC_ID"
+    else
+        PGO_WHY="$(basename "$CC") is not clang, and PGO here is clang-only"
+    fi
+fi
+
+# Teed, not just printed: the summary at the end reports whether the profile was
+# actually USED, and the only thing that knows that is CMake's own probe output.
+# Inferring it from "we passed -DMODULE_PGO_PROFILE" would report success on
+# every machine whose clang silently refused the file -- which is most of them.
 cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER="$CC" \
@@ -168,10 +370,185 @@ cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
       -DDOLRECOMP_SRC="$DEPS/dolrecomp-src" \
       -DGXRUNTIME_INC="$DEPS/gxruntime-include" \
       -DCHASSIS_ABI_DIR="$DEPS/chassis-abi" \
-      -DMODULE_TEMPLATE="$DEPS/module-template"
+      -DMODULE_TEMPLATE="$DEPS/module-template" 2>&1 | tee "$HERE/work/configure.log"
 cmake --build "$HERE/work/build"
 
 cp "$HERE/work/build/g${DISC_ID}_recomp.so" "$HERE/bin/"
+
+# What did CMake actually do with the profile? Its own probe is the authority:
+# a profile can be present, passed, and still refused for being too new to read,
+# and that refusal looks exactly like an ordinary build from the outside.
+if grep -q "module: PGO enabled" "$HERE/work/configure.log" 2>/dev/null; then
+    PGO_STATE="shipped"
+elif grep -q "cannot read the shipped PGO profile" "$HERE/work/configure.log" 2>/dev/null; then
+    PGO_WHY="your clang is older than the LLVM 22 that wrote the shipped profile"
+elif grep -q "total count of ZERO" "$HERE/work/configure.log" 2>/dev/null; then
+    PGO_WHY="the shipped profile reads as all-cold, which is worse than none"
+elif [ -n "$PROFILE" ] && [ -z "$PGO_WHY" ]; then
+    PGO_WHY="this compiler could not use the shipped profile"
+fi
+
+# --pgo: TRAIN A PROFILE ON THIS MACHINE'S CLANG, then rebuild with it.
+#
+# The profiles that ship are written by LLVM 22, and an indexed profile can only
+# be read by an LLVM at least as new as the one that wrote it -- so clang 20
+# (SteamOS 3.8, Fedora), 18 (Ubuntu 24.04) and 14 (Debian 12) all refuse them
+# with "unsupported instrumentation profile format version". CONFIRMED on a
+# stock Steam Deck: MODULE_PGO_USABLE came back empty and the module built 23 MB
+# instead of 39 MB. Readability is also not the whole story: a profile keys its
+# counts to a CFG hash the INSTRUMENTING compiler computed, so where two clang
+# versions build a different CFG for the same function the counts for it are
+# dropped -- silently, since the warning that would say so is suppressed below.
+# That part is reasoning about how -fprofile-use works, not something measured
+# here; the format refusal above IS measured. Either way no single shipped file
+# serves every clang, and the way to get the win on an arbitrary machine is to
+# make the profile on it, which is what this does.
+#
+# Worth 10-14% of CPU time -- the range is the machine, not the uncertainty.
+# Over 6000 fixed frames of an arcade match, 6 alternating reps per arm:
+#   desktop (Zen 3)    176.95 -> 158.66 Gcyc  -10.3%  (shipped profile)
+#                      176.95 -> 156.72 Gcyc  -11.4%  (trained here by --pgo)
+#   Steam Deck (Zen 2) 233.99 -> 201.07 Gcyc  -14.1%  (trained on the Deck,
+#                      8 runs an arm, ranges not overlapping, IPC 2.005 ->
+#                      2.136, wall clock 75.5s -> 68.3s)
+# A profile trained on the spot beat the shipped one by 1.22% on the desktop,
+# and the two arms' ranges did not overlap over 6 reps -- so --pgo is not a
+# degraded fallback, it is the better profile, which is what you would expect of
+# one whose CFG hashes match the compiler doing the build exactly.
+if [ "$PGO" = 1 ]; then
+  if ! "$CC" --version 2>&1 | grep -qi clang; then
+    echo
+    echo "==> --pgo needs clang; $CC is not clang, so skipping the training pass."
+    echo "    (GCC cannot read a clang profile and its own PGO was not measured here.)"
+  else
+    echo
+    echo "==> 4/$NSTAGES  Training a profile with YOUR clang (one time only)"
+    echo "    Measured: ~11 minutes on a desktop, on top of a normal build."
+    echo "    A Steam Deck is a good deal slower -- leave it running."
+    PROFDIR="$HERE/work/pgo"
+    rm -rf "$PROFDIR" "$HERE/work/build-gen"; mkdir -p "$PROFDIR"
+
+    # MODULE_LTO=OFF is REQUIRED here, not a speed choice: instrumented objects
+    # are LTO IR, and mixing them with a non-LTO link silently produces a 21 KB
+    # stub that loads and does nothing -- a training run against it would look
+    # like it worked and collect nothing.
+    if cmake -S "$HERE/module-src" -B "$HERE/work/build-gen" -GNinja \
+             -DCMAKE_BUILD_TYPE=Release \
+             -DCMAKE_C_COMPILER="$CC" \
+             -DCMAKE_C_FLAGS="-march=$MARCH -fprofile-generate=$PROFDIR" \
+             -DCMAKE_SHARED_LINKER_FLAGS="-fprofile-generate=$PROFDIR" \
+             -DMODULE_LTO=OFF \
+             -DGAME_ID="$DISC_ID" \
+             -DGENERATED_DIR="$HERE/work/out/generated" \
+             -DDOLRECOMP_SRC="$DEPS/dolrecomp-src" \
+             -DGXRUNTIME_INC="$DEPS/gxruntime-include" \
+             -DCHASSIS_ABI_DIR="$DEPS/chassis-abi" \
+             -DMODULE_TEMPLATE="$DEPS/module-template" >"$HERE/work/pgo-gen.log" 2>&1 \
+       && cmake --build "$HERE/work/build-gen" >>"$HERE/work/pgo-gen.log" 2>&1
+    then
+        # 6000 frames of ONE arcade match. Broader training sets were tried
+        # twice and both LOST (+2.18% and +1.26%): weight went to code the
+        # player does not run. Menus are not a substitute either -- they carry
+        # ~0.1% of a session's paired-single traffic.
+        echo "    playing 6000 frames to collect counts ..."
+        rm -rf "$HERE/work/pgo-user"; mkdir -p "$HERE/work/pgo-user/Config"
+        cp -r "$HERE/userdata/GC" "$HERE/work/pgo-user/" 2>/dev/null || true
+        # RINGOUT_DETERMINISM_LOG is what ARMS the harness: the frame-keyed
+        # input and the frame limit are both inert without it, so setting only
+        # FRAMES and INPUT gives a run that gets no input and never stops. That
+        # is not a hypothetical -- it is what the first version of this did, and
+        # it sat on the title screen past 10000 frames pushing 3 draws each.
+        # NOHASH keeps the input and the frame counter but drops the per-frame
+        # guest-RAM hash, which is wanted twice over here: it is ~29% of cycles,
+        # and profiling it would spend the profile's weight on the harness's
+        # crc32 instead of the game.
+        LLVM_PROFILE_FILE="$PROFDIR/%p.profraw" \
+        RINGOUT_GX_STATS=1000 \
+        RINGOUT_DETERMINISM_LOG="$HERE/work/pgo-frames.log" \
+        RINGOUT_DETERMINISM_NOHASH=1 \
+        RINGOUT_DETERMINISM_FRAMES=6000 \
+        RINGOUT_DETERMINISM_INPUT="$HERE/tools/train-route.txt" \
+          "$HERE/bin/moderngekko-run" --headless \
+            --user-dir "$HERE/work/pgo-user" --game "$HERE/game" \
+            --module "$HERE/work/build-gen/g${DISC_ID}_recomp.so" \
+            >"$HERE/work/pgo-train.log" 2>&1 || true
+
+        # DID THE TRAINING RUN ACTUALLY REACH A FIGHT? A run that parked on a
+        # dialog still exits cleanly and still writes a structurally valid
+        # profile -- one that says every block is cold, which builds a module
+        # SLOWER than no profile at all. Only a count can tell the two apart:
+        # gameplay pushes hundreds of draw calls a frame, a menu pushes about
+        # one. Measured on a PAL disc: 1.3 draws/frame over the logos, 259 once
+        # the match starts.
+        # `|| true` is load-bearing: this script runs under `set -o pipefail`,
+        # so a grep that matches nothing would fail the whole pipeline and abort
+        # setup -- in exactly the case the message below exists to explain.
+        DRAWS="$( { grep '^\[gx\]' "$HERE/work/pgo-train.log" 2>/dev/null || true; } | tail -1 |
+                 sed -n 's/.*draws=\([0-9]*\).*/\1/p')"
+        PROFDATA_TOOL="$(command -v llvm-profdata 2>/dev/null || true)"
+        if [ -z "$PROFDATA_TOOL" ]; then
+            for c in "$(dirname "$(command -v "$CC")")"/llvm-profdata*; do
+                [ -x "$c" ] && PROFDATA_TOOL="$c" && break
+            done
+        fi
+
+        TRAINED="$(wc -l < "$HERE/work/pgo-frames.log" 2>/dev/null || echo 0)"
+        if ! ls "$PROFDIR"/*.profraw >/dev/null 2>&1; then
+            PGO_WHY="the training run collected no counts -- see work/pgo-train.log"
+            echo "    the training run collected no counts (see work/pgo-train.log)."
+            echo "    Keeping the module you already have: it is correct, just slower."
+        elif [ -z "$DRAWS" ] || [ "$DRAWS" -lt 10 ] 2>/dev/null; then
+            echo "    the training run never reached a match (draws/frame=${DRAWS:-none},"
+            PGO_WHY="the training run never reached a match (no save data)"
+            echo "    frames=${TRAINED:-0} of 6000). Almost certainly NO SAVE DATA:"
+            echo "    with none, the game parks on the memory-card screen and the"
+            echo "    training route never gets into a fight. Measured on this route:"
+            echo "    84 draw calls a frame with a save, 2.4 without."
+            echo
+            echo "    PLAY THE GAME ONCE, far enough that it writes save data, then"
+            echo "    run --pgo again. Your save lives in userdata/GC/ and is picked"
+            echo "    up automatically."
+            echo
+            echo "    Keeping the module you already have -- a profile trained on a"
+            echo "    menu builds something SLOWER than no profile at all."
+        elif [ -z "$PROFDATA_TOOL" ]; then
+            PGO_WHY="llvm-profdata is not installed, so the counts could not be merged"
+            echo "    counts were collected but llvm-profdata is not installed, so they"
+            echo "    cannot be merged. Install it (SteamOS: pacman -S llvm) and re-run."
+        else
+            "$PROFDATA_TOOL" merge -output="$HERE/work/local.profdata" "$PROFDIR"/*.profraw
+            echo "    rebuilding with your own profile ..."
+            rm -rf "$HERE/work/build"
+            if cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
+                     -DCMAKE_BUILD_TYPE=Release \
+                     -DCMAKE_C_COMPILER="$CC" \
+                     -DCMAKE_C_FLAGS="-march=$MARCH" \
+                     -DMODULE_PGO_PROFILE="$HERE/work/local.profdata" \
+                     -DGAME_ID="$DISC_ID" \
+                     -DGENERATED_DIR="$HERE/work/out/generated" \
+                     -DDOLRECOMP_SRC="$DEPS/dolrecomp-src" \
+                     -DGXRUNTIME_INC="$DEPS/gxruntime-include" \
+                     -DCHASSIS_ABI_DIR="$DEPS/chassis-abi" \
+                     -DMODULE_TEMPLATE="$DEPS/module-template" >"$HERE/work/pgo-use.log" 2>&1 \
+               && cmake --build "$HERE/work/build" >>"$HERE/work/pgo-use.log" 2>&1
+            then
+                cp "$HERE/work/build/g${DISC_ID}_recomp.so" "$HERE/bin/"
+                PGO_STATE="self-trained"; PGO_WHY=""
+                echo "    done -- built with a profile trained on your own machine."
+            else
+                PGO_WHY="the profiled rebuild failed -- see work/pgo-use.log"
+                echo "    the profiled rebuild failed (see work/pgo-use.log)."
+                echo "    Keeping the module you already have."
+            fi
+        fi
+    else
+        PGO_WHY="the instrumented build failed -- see work/pgo-gen.log"
+        echo "    the instrumented build failed (see work/pgo-gen.log)."
+        echo "    Keeping the module you already have."
+    fi
+    rm -rf "$HERE/work/build-gen" "$PROFDIR" "$HERE/work/pgo-user"
+  fi
+fi
 
 # The module you just built is also the one you copy to a Steam Deck -- the Deck
 # package ships no module and its README sends you here to make one. SteamOS is
@@ -239,7 +616,36 @@ elif [ "$deck_ok" = 0 ]; then
 elif [ "$DECK" = 1 ]; then
     echo
     echo "    Deck-compatible: -march=x86-64-v3, glibc floor ${floor:-unknown}."
-    echo "    Copy game/ and bin/g${DISC_ID}_recomp.so into the Deck package."
+    # Do the copy rather than describing it. The two-command dance was pure
+    # error surface: forget one and the package is a module without a disc, or
+    # a disc without a module, and the launcher can only say "incomplete".
+    #
+    # A Deck package is recognised by shape -- a runtime and a README, and NO
+    # setup.sh, since that is what makes it the prebuilt one. Exactly one
+    # sibling qualifying: install into it. None, or several: say what to do and
+    # let the player choose, because guessing which one they meant is worse
+    # than asking.
+    deck_pkgs=()
+    for cand in "$HERE"/../*/; do
+        [ -d "$cand" ] || continue
+        [ -x "$cand/bin/moderngekko-run" ] || continue
+        [ -f "$cand/README.txt" ] || continue
+        [ -f "$cand/setup.sh" ] && continue
+        deck_pkgs+=("$cand")
+    done
+    if [ "${#deck_pkgs[@]}" = 1 ]; then
+        target="$(cd "${deck_pkgs[0]}" && pwd)"
+        echo "    Installing into $(basename "$target") ..."
+        rm -rf "$target/game"
+        cp -r "$HERE/game" "$target/game"
+        cp "$HERE/bin/g${DISC_ID}_recomp.so" "$target/bin/"
+        echo "    done: game/ and g${DISC_ID}_recomp.so are in $(basename "$target")."
+        echo "    Play it with:  cd $target && ./RingOut"
+    else
+        echo "    Copy game/ and bin/g${DISC_ID}_recomp.so into the Deck package:"
+        echo "      cp -r $HERE/game <deck-package>/"
+        echo "      cp $HERE/bin/g${DISC_ID}_recomp.so <deck-package>/bin/"
+    fi
 fi
 
 # The game's own artwork, taken from the disc you supplied. None of it ships in
@@ -269,6 +675,49 @@ DESKTOP
     chmod +x "$HERE/RingOut.desktop"
     echo "    RingOut.desktop -> $(basename "$ICON")"
 fi
+
+# THE PROFILE VERDICT, said once, at the end, where it cannot be scrolled past.
+# Everything above about the profile is a STATUS line in the middle of a 20-
+# minute build, and nobody scrolls back through a thousand lines of ninja output
+# to find out whether a flag took effect. The failure this guards against is
+# silent by nature: an unprofiled module is CORRECT, boots, plays, and is simply
+# 10-14% slower forever.
+echo
+echo "-----------------------------------------------------------------------"
+case "$PGO_STATE" in
+  self-trained)
+    echo "  Profile:  YES -- trained on this machine, with your own clang."
+    echo "            The best case: measured 1.2% AHEAD of the profile that"
+    echo "            ships, because it matches your compiler exactly."
+    ;;
+  shipped)
+    echo "  Profile:  YES -- using the profile that ships for $DISC_ID."
+    echo "            Worth 10-14% of CPU time against no profile at all."
+    ;;
+  *)
+    echo "  Profile:  NO -- this module is UNPROFILED."
+    echo
+    echo "  Why:      ${PGO_WHY:-no profile was available for this build}."
+    echo
+    echo "  Costs:    10-14% of CPU time, forever. On a Steam Deck that is"
+    echo "            the difference between holding 60 fps and not, in the"
+    echo "            heavier stages. Nothing else is affected: the module is"
+    echo "            CORRECT, plays identically, and saves are unaffected."
+    if [ "$PGO" != 1 ]; then
+      if "$CC" --version 2>&1 | grep -qi clang; then
+    echo
+    echo "  Fix:      ./setup.sh --pgo $(basename "$ISO")"
+    echo "            Builds it again, trains a profile by playing 6000 frames,"
+    echo "            and rebuilds with it. ~11 min extra on a desktop, once."
+    echo "            Needs llvm-profdata (Arch: pacman -S llvm)."
+      else
+    echo
+    echo "  Fix:      install clang, then re-run. PGO here is clang-only."
+      fi
+    fi
+    ;;
+esac
+echo "-----------------------------------------------------------------------"
 
 echo
 echo "Setup complete. Run ./RingOut to play."

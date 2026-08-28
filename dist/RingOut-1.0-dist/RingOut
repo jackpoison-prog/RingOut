@@ -178,7 +178,21 @@ esac
 # hostname or user lookups (netplay) may fall over. Local play generally does not
 # touch them. If it crashes here, the real fix is building against an older
 # glibc (Steam Runtime container), not more bundling.
-NEED_GLIBC=2.44
+# The floor of bin/moderngekko-run, which is built in the Debian 12 container
+# (build-deck.sh), NOT on the developer's machine. This said 2.44 -- the glibc
+# of the machine the runtime USED to be built on -- long after the build moved
+# into the container.
+#
+# The cost of getting it wrong is not a warning. Anything between this number
+# and the true floor takes the bundled-glibc path unnecessarily, and that path
+# is the one the README warns about: the Vulkan loader dlopens the host's Mesa,
+# which then resolves its own dependencies against the bundled copies and finds
+# no driver. A Steam Deck (glibc 2.41) hit exactly this: "host glibc 2.41 is
+# older than 2.44", bundled loader, and then no module. The module was fine.
+#
+# package-dist.sh now asserts this matches the shipped binary, so it cannot
+# drift again.
+NEED_GLIBC=2.36
 host_glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1)"
 LOADER="$HERE/libc-fallback/ld-linux-x86-64.so.2"
 

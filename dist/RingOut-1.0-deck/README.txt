@@ -2,10 +2,15 @@ Ring Out - Ver 1.3
 Steam Deck / SteamOS build
 ==========================
 
-This package contains NO game data and NO game code. Unlike the desktop
-package there is also no setup step here: SteamOS ships compilers without
-the C library headers and mounts /usr read-only, so nothing can be built
-on the Deck itself. The runtime is prebuilt against an old glibc instead.
+This package contains NO game data and NO game code. There is no setup step
+here: the runtime is prebuilt against an old glibc, because SteamOS ships no
+compiler and mounts /usr read-only.
+
+The easy path is still to build your module on a desktop Linux machine and
+copy it across -- see GETTING YOUR GAME ONTO IT. But if you do not have one,
+BUILDING ON THE DECK ITSELF at the end of this file is a route that has been
+done and works. (An earlier version of this file said nothing could be built
+on the Deck. That was wrong.)
 
   runtime  built against glibc 2.36; SteamOS ships ~2.37, and binaries run
            forward across glibc versions but never backward
@@ -72,8 +77,13 @@ SETTINGS MENU TABS
             under more than one backend -- Steam Deck, SDL and XInput2 are
             all built in -- so those two rows pick which one is used.
             Space on either of them re-scans for pads plugged in since.
-  CHEATS    master switch, plus any codes you add yourself to
-            userdata/GameSettings/<DISCID>.ini
+  CHEATS    master switch, plus a code list for your disc. 23 codes ship
+            for the USA release and 177 for the European one, all listed
+            and none enabled -- turn on what you want. A Japanese disc
+            gets an empty list; no Japanese codes exist to ship, and the
+            USA ones would point at unrelated memory in that build.
+            Add your own to userdata/GameSettings/<DISCID>.ini; that file
+            is yours and an update will not overwrite it.
 
   A word on internal resolution: the Deck renders this game comfortably at
   2x, and 2x is already well above the 1280x800 panel. Higher multipliers
@@ -114,11 +124,58 @@ WHAT IS IN THIS FOLDER
   RingOut       launcher
   bin/          the runtime, and your recompiled module once you copy it in
   lib/          bundled support libraries
+  tools/        dolrecomp, the recompiler, statically linked so it runs on
+                SteamOS as-is; gc-art.py, which pulls the banner and icon
+                out of your own disc
   shaders/      the bundled filters, installed to userdata on first run
+  gamesettings/ the cheat lists, installed to userdata on first run
 
   Created on first run, or copied from a desktop setup:
   game/         your extracted disc
   userdata/     settings, save states, screenshots
+
+BUILDING ON THE DECK ITSELF (no second machine)
+  Harder than the desktop route and it does not survive a SteamOS update,
+  but it works -- the whole toolchain has been built and played on a Deck.
+
+  What you need is a C compiler and headers. SteamOS has neither by
+  default, and getting them has one trap that wastes an hour:
+
+    sudo steamos-readonly disable
+    sudo pacman-key --init && sudo pacman-key --populate archlinux
+    sudo pacman -S base-devel glibc linux-api-headers cmake ninja
+
+  DO NOT ADD --needed. SteamOS ships an image with /usr/include stripped
+  while leaving the packages REGISTERED as installed: pacman's database
+  claims glibc owns 504 files under /usr/include and 14 are there. With
+  --needed, pacman decides everything is present, installs nothing, and
+  you get compilers with no headers. Reinstalling without it is a file
+  restore, not an upgrade -- SteamOS pins snapshot repos, so the version
+  you get is the version you already have.
+
+  NEVER use -Sy or -Syu. Those can pull a newer snapshot, which is the
+  thing that actually breaks a Deck.
+
+  Then, with your disc image on the Deck:
+
+    ./tools/dolrecomp extract /path/to/disc.iso ./game
+    ./tools/dolrecomp --gamecube ./game/sys/main.dol --idle-pc auto \
+        -j$(nproc) ./work/out
+    cp ./game/sys/main.dol ./work/out/generated/main.dol
+
+  If that first line says "unsupported format", your image is .rvz, .gcz or
+  .wia. The recompiler reads .iso, .gcm and .wbfs; the runtime reads all of
+  them, so extract with it instead and carry on from line two:
+
+    ./bin/moderngekko-run --extract /path/to/disc.rvz ./game
+
+  and compile ./work/out/generated into bin/g<ID>_recomp.so. The desktop
+  package's module-src/ holds the CMake project for that step; copy it
+  across, or use the desktop package on the Deck directly -- its setup.sh
+  does all of the above in one go once a compiler exists.
+
+  A SteamOS update wipes everything installed into /usr, so keep the
+  module you built: it is just a file, and it keeps working.
 
 CREDITS, DISCLAIMER AND LICENSING
   See CREDITS.txt. Short version: this is an unofficial fan project by

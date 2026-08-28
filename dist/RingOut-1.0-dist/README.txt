@@ -14,14 +14,70 @@ QUICK START
   You can also do the setup step directly:
       ./setup.sh /path/to/your/disc.iso
       ./setup.sh --deck /path/to/your/disc.iso    (module for a Steam Deck)
+      ./setup.sh --pgo  /path/to/your/disc.iso    (see below -- 10-14% faster)
+
+WANT THE LAST 10-14%?  ./setup.sh --pgo
+  A profile-guided build is worth 10-14% of CPU time -- measured over 6000
+  fixed frames of an arcade match, 10.3% on a desktop and 14.1% on a Steam
+  Deck. Which end of that range you land on is your machine, not luck. Profiles for the three stock discs ship in
+  module-src/profiles/ and are used automatically -- but ONLY if your clang
+  is new enough to read them. They are written by LLVM 22, and a profile can
+  only be read by an LLVM at least as new as the one that wrote it, so the
+  clang on SteamOS (20), Ubuntu 24.04 (18) and Debian 12 (14) all refuse
+  them. If setup says "this clang cannot read the shipped PGO profile", that
+  is what happened, and your module is correct but 10-14% slower.
+
+  --pgo fixes it on any clang: it builds an instrumented module, plays 6000
+  frames of an arcade match to collect counts, and rebuilds using those. It
+  needs llvm-profdata installed (SteamOS/Arch: pacman -S llvm;
+  Debian/Ubuntu: apt install llvm). Measured cost on a desktop: about 11
+  minutes on top of a normal build, once. A Deck takes considerably longer.
+
+  PLAY THE GAME FIRST. The training route needs your save data to get past
+  the memory-card screen; without it the game sits on that screen for the
+  whole run, and setup will say so and keep your existing module. One
+  session that writes a save is enough -- it lives in userdata/GC/ and is
+  picked up automatically.
+
+  WHAT IT COSTS YOU, AND WHAT IT BUYS
+    For:
+      * 10-14% less CPU time. Measured over 6000 fixed frames: 176.95 ->
+        158.66 Gcyc on a desktop, and 233.99 -> 201.07 on a Steam Deck
+        (8 runs an arm, ranges not overlapping, one identical hash).
+        On the Deck that is 75.5s of wall clock down to 68.3s.
+      * On a Deck that is the margin that decides whether the heavier
+        stages hold 60 fps.
+      * A profile you train yourself is not second best. It came out 1.2%
+        AHEAD of the one that ships, and the two did not overlap over six
+        runs each, because it matches your compiler exactly.
+      * It changes speed only. The guest state is untouched -- all 18
+        benchmark runs produced one identical hash, profiled or not, so
+        saves, netplay and replays behave the same.
+    Against:
+      * Time, once: about 11 minutes on a desktop, 26 on a Steam Deck, on
+        top of the normal build.
+      * Needs clang and llvm-profdata. gcc cannot do it.
+      * Needs save data to train against (see above).
+      * The module roughly doubles on disk, 23 MB -> 39 MB.
+      * A profile belongs to ONE disc. Change region and you train again.
+      * Interrupting the training run leaves your existing module alone --
+        setup would rather keep a working module than fit a profile to a
+        run that stopped early.
+
+  You never have to do this. An unprofiled module is correct and plays
+  fine; it is simply slower.
 
 ON A STEAM DECK?
   Download RingOut-1.1-steamdeck-x86_64.zip instead -- it ships prebuilt
-  binaries, because SteamOS mounts /usr read-only and has no C headers, so
-  nothing can be compiled on the device.
+  binaries, because a stock SteamOS has no compiler and mounts /usr
+  read-only, so out of the box nothing can be built on the device.
 
-  You still need THIS package once, on a desktop. Build the module with
-  the --deck flag:
+  You can lift that: unlock the filesystem and install a toolchain, and the
+  Deck compiles its own module perfectly well -- tested end to end on
+  SteamOS 3.8.25, and it produces a module that needs no bundled libraries
+  at all. BUILD-ON-THE-DECK.md in the Steam Deck package has the commands.
+
+  Otherwise build it on a desktop from THIS package, with the --deck flag:
 
       ./setup.sh --deck /path/to/your/disc.iso
 

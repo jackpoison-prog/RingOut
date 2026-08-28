@@ -39,6 +39,10 @@
 !/work/mg_userdir/GameSettings/
 /work/mg_userdir/GameSettings/*
 !/work/mg_userdir/GameSettings/GRSEAF.ini
+# The Japanese list, authored here the same way. Whitelisted BY NAME like the
+# USA one: everything else under this directory is the developer's own Dolphin
+# state, so the default stays "ignore" and each authored file is an exception.
+!/work/mg_userdir/GameSettings/GRSJAF.ini
 
 # ---------------------------------------------------------------------------
 # Abandoned runtime experiments -- not part of the shipped build.
@@ -144,3 +148,4 @@ compile_commands.json
 # Deck-targeted module build tree (clang + PGO + -march=znver2), like /build-dolrecomp/
 /build-module-deck/
 /build-module-aug12/
+__pycache__/

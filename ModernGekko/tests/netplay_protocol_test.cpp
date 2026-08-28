@@ -6,7 +6,13 @@
 //
 //   NetPlay::SetCompatibilityFingerprint, NetPlayClient::GetConnectionError,
 //   ConnectionError::CompatibilityMismatch  -- a build-hash handshake that
-//     rejects a mismatched peer at connect time
+//     rejects a mismatched peer at connect time.
+//     LANDED 2026-08-25, in this tree rather than the fork, as
+//     NetPlay::SetGameIdentity + ConnectionError::DifferentGame /
+//     ::CompatibilityMismatch. Asserted at the end of this file. It exists
+//     because three regions of the game now recompile, so two players can
+//     hold discs that look identical -- same title, same internal name -- and
+//     desync from the first frame.
 //   NetPlayServer::CanStart, NetPlayServer::SetAdaptiveBuffer
 //   NetPlayClient::SetLocalControllerCount / GetAssignedControllerCount /
 //     GetPlayersSnapshot, and a 6th constructor argument for the local
@@ -196,6 +202,67 @@ int main() {
   if (first_fingerprint ==
       moderngekko::frontend::CompatibilityFingerprint(changed_config, metadata))
     return 12;
+
+  // ---- identity handshake --------------------------------------------------
+  //
+  // The server captures its identity when constructed, so changing the
+  // process-wide one afterwards gives the joining client a DIFFERENT identity
+  // inside a single process -- which is the only way to test a two-sided
+  // handshake without two machines.
+  //
+  // Ordering matters: this runs before UICommon::Init() and the shared lobby
+  // below, so a rejected connection cannot leave a half-joined player in the
+  // roster the later assertions count.
+  {
+    NetPlay::SetGameIdentity("GRSEAF", "fingerprint-A");
+    TestUI reject_host_ui;
+    auto reject_server = std::make_unique<NetPlay::NetPlayServer>(
+        0, false, &reject_host_ui, NetPlay::NetTraversalConfig{});
+    if (!reject_server->is_connected)
+      return 20;
+
+    // A different disc: what a Japanese or European copy looks like to a US
+    // host. Rejected at connect, so IsConnected() is false and the dialog was
+    // given a reason.
+    NetPlay::SetGameIdentity("GRSJAF", "fingerprint-A");
+    TestUI wrong_disc_ui;
+    auto wrong_disc = std::make_unique<NetPlay::NetPlayClient>(
+        "127.0.0.1", reject_server->GetPort(), &wrong_disc_ui, "WrongDisc",
+        NetPlay::NetTraversalConfig{});
+    if (wrong_disc->IsConnected())
+      return 21;
+    if (wrong_disc_ui.error.find("different game") == std::string::npos)
+      return 22;
+    wrong_disc.reset();
+
+    // Same disc, module built by different tools. The sync identifier cannot
+    // see this one -- only the fingerprint can.
+    NetPlay::SetGameIdentity("GRSEAF", "fingerprint-B");
+    TestUI wrong_build_ui;
+    auto wrong_build = std::make_unique<NetPlay::NetPlayClient>(
+        "127.0.0.1", reject_server->GetPort(), &wrong_build_ui, "WrongBuild",
+        NetPlay::NetTraversalConfig{});
+    if (wrong_build->IsConnected())
+      return 23;
+    if (wrong_build_ui.error.find("differently built") == std::string::npos)
+      return 24;
+    wrong_build.reset();
+
+    // And the matching case still connects, or the check above would pass by
+    // rejecting everything.
+    NetPlay::SetGameIdentity("GRSEAF", "fingerprint-A");
+    TestUI match_ui;
+    auto match = std::make_unique<NetPlay::NetPlayClient>(
+        "127.0.0.1", reject_server->GetPort(), &match_ui, "Match",
+        NetPlay::NetTraversalConfig{});
+    if (!match->IsConnected())
+      return 25;
+    match.reset();
+    reject_server.reset();
+  }
+  // Cleared, so the lobby below runs the way it always did -- an empty
+  // fingerprint means "did not say" and skips the comparison entirely.
+  NetPlay::SetGameIdentity("", "");
 
   const auto directory =
       std::filesystem::temp_directory_path() / "moderngekko-netplay-test";

@@ -1,0 +1,99 @@
+GET THE LAST 13% ON THE DECK  (setup.sh --pgo)
+==============================================
+
+Your PAL module works, but it was built WITHOUT a profile, because the profile
+that ships was made by LLVM 22 and SteamOS ships clang 20 - and a profile can
+only be read by an LLVM at least as new as the one that wrote it. You saw the
+result: the module came out 23 MB instead of the 39 MB a profiled build makes.
+
+The fix is to make the profile with the clang you actually have. That is what
+--pgo does, and it works on any clang.
+
+Everything is already in place on this Deck except one package.
+
+
+STEP 1 - install llvm (this is the part that needs your password)
+-----------------------------------------------------------------
+
+    sudo steamos-readonly disable
+    sudo pacman -S llvm
+
+llvm-profdata is what merges the counts. Installing clang does NOT give you it -
+checked on this Deck: clang 20.1.8 was here, llvm-profdata was not.
+
+Do NOT add --needed, and never -Sy or -Syu. Same reasons as
+~/Desktop/INSTALL-TOOLCHAIN.txt.
+
+
+STEP 2 - run it
+---------------
+
+    cd ~/ringout-build/RingOut-1.4-linux
+    ./setup.sh --deck --pgo "$HOME/ringout-build/Soulcalibur II (Europe).iso"
+
+Leave it alone for a while. It builds the module, then builds a SECOND
+instrumented one, plays 6000 frames of an arcade match with no window to
+collect counts, merges them, and builds a third time using them.
+
+On a desktop the whole run took 19 minutes, of which --pgo added about 11.
+The Deck has not been timed yet, and it built the plain module in about 35
+minutes, so budget an hour or so and go and do something else.
+
+You do NOT need to press anything during the training run - it drives itself
+from a recorded input script.
+
+
+WHAT YOU SHOULD SEE
+-------------------
+
+    ==> 4/4  Training a profile with YOUR clang (one time only)
+        playing 6000 frames to collect counts ...
+        rebuilding with your own profile ...
+        done -- built with a profile trained on your own machine.
+
+Then check the size - this is the quick tell:
+
+    ls -la ~/ringout-build/RingOut-1.4-deck/bin/gGRSPAF_recomp.so
+
+About 39 MB means profiled. About 23 MB means it kept the old one.
+
+setup.sh copies the finished module into the Deck package by itself, so there
+is nothing to move afterwards.
+
+
+IF IT SAYS "the training run never reached a match"
+---------------------------------------------------
+
+It needs your save file to get past the memory-card screen, and it keeps your
+existing module rather than building a worse one from a profile trained on a
+menu screen.
+
+You already have a PAL save here, so this should not happen:
+
+    ~/ringout-build/RingOut-1.4-linux/userdata/GC/EUR/Card A/AF-GRSP-sc2_0.dat.gci
+
+If it ever does, play the game once so it writes save data, then re-run.
+
+
+IS IT WORTH IT?
+---------------
+
+About 14% of CPU time, now measured on THIS Deck with the profile it trained
+itself, 8 runs per arm over 6000 fixed frames:
+
+    unprofiled    233.99 Gcyc   468.98 Ginsn   IPC 2.005   75.5s
+    --pgo         201.07 Gcyc   429.38 Ginsn   IPC 2.136   68.3s
+
+-14.07% cycles. The two arms' ranges do not overlap, and all 16 runs produced
+one identical hash, so both did exactly the same emulated work.
+
+The same comparison run on the desktop, three ways over 6000 fixed frames:
+
+    unprofiled                 176.95 Gcyc
+    shipped profile            158.66 Gcyc   -10.3%
+    profile trained by --pgo   156.72 Gcyc   -11.4%
+
+So a profile you train yourself is not a downgrade from the one that ships -
+it came out 1.2% AHEAD, with the two arms' ranges not even overlapping over
+six runs each. It is optional either way: the module you have now is correct
+and plays fine.

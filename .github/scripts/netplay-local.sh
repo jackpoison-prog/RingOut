@@ -30,6 +30,11 @@
 set -u
 P="${P:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 W="${1:-/tmp/netplay-local}"
+# Absolute, because each peer runs `cd "$PKG"` before exec: a relative work dir
+# then resolves under the PACKAGE, the determinism log fopen()s a directory that
+# does not exist, and the hash comparison below is skipped rather than failed --
+# the run still prints "no desync reported" and looks like a pass. That happened.
+case "$W" in /*) ;; *) W="$PWD/$W" ;; esac
 PLAY="${2:-60}"
 PORT="${3:-2626}"
 PKG="$P/dist/RingOut-1.0-deck"
@@ -167,7 +172,16 @@ grep -a "netplay:\|fmv-hle\|staticrecomp. shutdown" "$W/host/log.txt" 2>/dev/nul
 echo "================ GUEST ==============="
 grep -a "netplay:\|fmv-hle\|staticrecomp. shutdown" "$W/guest/log.txt" 2>/dev/null
 echo "======================================"
-if [ "${HASH:-0}" = "1" ] && [ -s "$W/host/hash.log" ] && [ -s "$W/guest/hash.log" ]; then
+hash_verdict=""
+if [ "${HASH:-0}" = "1" ] && { [ ! -s "$W/host/hash.log" ] || [ ! -s "$W/guest/hash.log" ]; }; then
+  # HASH=1 asked for the strong check. Not getting it is a failed run, not a
+  # quiet downgrade to the DESYNC grep -- which only catches what Dolphin itself
+  # noticed, and is exactly the weaker claim this flag exists to avoid.
+  echo "HASH=1 but no per-frame hashes were written:"
+  [ -s "$W/host/hash.log" ]  || echo "  host:  $W/host/hash.log missing or empty"
+  [ -s "$W/guest/hash.log" ] || echo "  guest: $W/guest/hash.log missing or empty"
+  hash_verdict="NOT RUN"
+elif [ "${HASH:-0}" = "1" ]; then
   # Compare only the frames both peers reached; one is always killed a moment
   # before the other, and a length difference is not a state difference.
   n=$(( $(wc -l < "$W/host/hash.log") < $(wc -l < "$W/guest/hash.log") \
@@ -177,17 +191,32 @@ if [ "${HASH:-0}" = "1" ] && [ -s "$W/host/hash.log" ] && [ -s "$W/guest/hash.lo
   echo "guest-RAM hash comparison over $n frames:"
   if diff -q "$W/host.trim" "$W/guest.trim" >/dev/null; then
     echo "  IDENTICAL on every frame"
+    hash_verdict="IDENTICAL"
   else
     echo "  FIRST DIVERGENCE:"
     diff "$W/host.trim" "$W/guest.trim" | head -4
+    hash_verdict="DIVERGED"
   fi
 fi
 
+# Exit code as well as a line of text, so a caller that is not reading the
+# output cannot mistake any of this for success.
 if grep -qa "DESYNC" "$W/host/log.txt" "$W/guest/log.txt" 2>/dev/null; then
   echo "RESULT: DESYNCED"
-elif grep -qa "netplay armed" "$W/host/log.txt" 2>/dev/null && \
-     grep -qa "netplay armed" "$W/guest/log.txt" 2>/dev/null; then
-  echo "RESULT: both peers ran netplay-armed with no desync reported"
-else
+  exit 1
+elif [ "$hash_verdict" = "DIVERGED" ]; then
+  echo "RESULT: DESYNCED (per-frame hashes diverged; Dolphin did not notice)"
+  exit 1
+elif ! grep -qa "netplay armed" "$W/host/log.txt" 2>/dev/null || \
+     ! grep -qa "netplay armed" "$W/guest/log.txt" 2>/dev/null; then
   echo "RESULT: session did not start"
+  exit 1
+elif [ "$hash_verdict" = "NOT RUN" ]; then
+  echo "RESULT: INCONCLUSIVE -- peers ran netplay-armed, but the hash check asked"
+  echo "        for with HASH=1 never ran, so this is not the check you wanted"
+  exit 1
+elif [ "$hash_verdict" = "IDENTICAL" ]; then
+  echo "RESULT: both peers ran netplay-armed, hashes identical on every frame"
+else
+  echo "RESULT: both peers ran netplay-armed with no desync reported"
 fi

@@ -33,7 +33,7 @@ OUT="${OUT:-$REPO/dist}"
 # working package directory, which keeps its historical RingOut-1.0-* name:
 # that is 1.3 GB of developer state referenced by .gitignore and a dozen
 # scripts, and renaming it would churn all of them for nothing a player sees.
-VERSION="${VERSION:-1.3}"
+VERSION="${VERSION:-1.1}"
 PKG="RingOut-1.0-deck"
 SRC="$REPO/dist/$PKG"
 
@@ -148,13 +148,62 @@ install -m 755 "$SRC/RingOut"    "$STAGE/RingOut"
 # Same extractor the desktop package ships. The Deck package has no setup.sh --
 # it is prebuilt -- so the launcher runs this the first time a game is present.
 install -m 755 "$REPO/dist/shared/gc-art.py" "$STAGE/tools/gc-art.py"
+
+# The recompiler, so the Deck can turn a disc into generated C without a second
+# machine. It is statically linked, which is what makes it safe to ship into
+# SteamOS: no glibc floor at all. It does NOT make the Deck self-sufficient on
+# its own -- compiling the generated C still needs a C compiler and headers, and
+# SteamOS ships neither by default -- but it removes one of the two halves, and
+# the README now documents the other.
+#
+# Sourced from the desktop package, which is where the static build lands.
+DOLRECOMP="$REPO/dist/RingOut-1.0-dist/tools/dolrecomp"
+if [ -x "$DOLRECOMP" ]; then
+  if file "$DOLRECOMP" 2>/dev/null | grep -q 'statically linked'; then
+    install -m 755 "$DOLRECOMP" "$STAGE/tools/dolrecomp"
+    echo "    + tools/dolrecomp (static)"
+  else
+    echo "  FAIL: $DOLRECOMP is not statically linked; it would need a glibc" >&2
+    echo "        SteamOS may not have. Rebuild it with -DCMAKE_EXE_LINKER_FLAGS=-static." >&2
+    exit 1
+  fi
+else
+  echo "  FAIL: no recompiler at $DOLRECOMP -- the Deck package needs it to" >&2
+  echo "        recompile a disc on-device. Build the desktop package first." >&2
+  exit 1
+fi
 install -m 644 "$SRC/README.txt" "$STAGE/README.txt"
 # The version line is stamped at stage time rather than maintained by hand.
 # The 1.2.1 release shipped a README whose first line read "Ver 1.1" because
 # this was a verbatim copy and nobody edits a header twice.
 sed -i "1s/^Ring Out - Ver .*/Ring Out - Ver $VERSION/" "$STAGE/README.txt"
 install -m 644 "$SRC/CREDITS.txt" "$STAGE/CREDITS.txt"
+# Building on the Deck itself. The desktop README points players here by name,
+# so it has to actually ship -- it lived only in work/ (gitignored) for a while
+# and the pointer was a promise to a file nobody would ever receive.
+install -m 644 "$SRC/BUILD-ON-THE-DECK.md" "$STAGE/BUILD-ON-THE-DECK.md"
+# Version-stamped the same way, and matching ANY version rather than the one
+# that happened to be current when this was written: a literal pattern stops
+# matching the moment someone hand-edits the doc, and stops SILENTLY.
+sed -i -E "s/RingOut-[0-9]+\.[0-9]+(\.[0-9]+)?-/RingOut-$VERSION-/g" \
+    "$STAGE/BUILD-ON-THE-DECK.md"
+if grep -qE "RingOut-[0-9]+\.[0-9]+(\.[0-9]+)?-" "$STAGE/BUILD-ON-THE-DECK.md" &&
+   ! grep -q "RingOut-$VERSION-" "$STAGE/BUILD-ON-THE-DECK.md"; then
+  echo "  FAIL: BUILD-ON-THE-DECK.md still names a version that is not $VERSION" >&2
+  exit 1
+fi
 for f in "$SRC"/shaders/*.glsl; do install -m 644 "$f" "$STAGE/shaders/"; done
+
+# The cheat lists, shipped at top level and installed into userdata/GameSettings
+# on first run -- exactly what shaders/ above already does, and for the same
+# reason: userdata/ is the developer's own state and never goes in a package,
+# but the player still needs these files to arrive somewhere Dolphin reads.
+#
+# Until now the Deck package shipped no cheat list at all, for ANY region, while
+# the desktop package shipped the USA one. A Deck player with the same disc got
+# an empty CHEATS tab and no way to know why.
+echo "==> game settings"
+"$REPO/dist/shared/stage-gamesettings.sh" "$REPO" "$STAGE/gamesettings"
 
 # --- checks ---------------------------------------------------------------
 # A package that ships the disc, the save card or the module is the failure

@@ -121,7 +121,8 @@ NetPlayServer::~NetPlayServer()
 // called from ---GUI--- thread
 NetPlayServer::NetPlayServer(const u16 port, const bool forward_port, NetPlayUI* dialog,
                              const NetTraversalConfig& traversal_config)
-    : m_dialog(dialog)
+    : m_dialog(dialog), m_game_disc_id(GetGameDiscId()),
+      m_game_fingerprint(GetGameFingerprint())
 {
   //--use server time
   if (enet_initialize() != 0)
@@ -462,6 +463,20 @@ ConnectionError NetPlayServer::OnConnect(ENetPeer* incoming_connection, sf::Pack
 
   if (StringUTF8CodePointCount(new_player.name) > MAX_NAME_LENGTH)
     return ConnectionError::NameTooLong;
+
+  // What the joining peer is about to run. An older build sends neither field,
+  // which reads back as empty and is treated as "did not say" rather than as a
+  // mismatch, so this cannot reject a peer over a protocol difference.
+  std::string peer_disc_id;
+  std::string peer_fingerprint;
+  if (received_packet >> peer_disc_id && received_packet >> peer_fingerprint &&
+      !peer_fingerprint.empty() && !m_game_fingerprint.empty())
+  {
+    if (peer_disc_id != m_game_disc_id)
+      return ConnectionError::DifferentGame;
+    if (peer_fingerprint != m_game_fingerprint)
+      return ConnectionError::CompatibilityMismatch;
+  }
 
   // Update time in milliseconds of no acknowledgment of
   // sent packets before a connection is deemed disconnected

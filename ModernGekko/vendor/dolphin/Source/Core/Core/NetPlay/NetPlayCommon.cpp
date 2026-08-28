@@ -309,4 +309,30 @@ std::optional<std::vector<u8>> DecompressPacketIntoBuffer(sf::Packet& packet)
 
   return out_buffer;
 }
+
+namespace
+{
+// Process-wide, like the netplay version string it travels beside: the client
+// and server construct their handshake packets deep inside their own code, and
+// threading this through both constructors would touch every caller for a value
+// that is fixed for the life of the process.
+std::string s_game_disc_id;
+std::string s_game_fingerprint;
+}  // namespace
+
+void SetGameIdentity(std::string disc_id, std::string fingerprint)
+{
+  s_game_disc_id = std::move(disc_id);
+  s_game_fingerprint = std::move(fingerprint);
+}
+
+const std::string& GetGameDiscId()
+{
+  return s_game_disc_id;
+}
+
+const std::string& GetGameFingerprint()
+{
+  return s_game_fingerprint;
+}
 }  // namespace NetPlay

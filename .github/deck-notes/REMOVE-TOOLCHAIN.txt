@@ -1,0 +1,84 @@
+RESET THE DECK'S BUILD TOOLCHAIN
+================================
+
+Purpose: put this Deck back to how SteamOS ships it, so the Ring Out build
+instructions can be tested the way a new user would meet them. Right now this
+Deck has a toolchain installed on 10 Aug 2026, which no fresh Deck has.
+
+Run these in Konsole (Desktop Mode). You will be asked for your sudo password.
+If you have never set one:  passwd
+
+
+STEP 1 - allow changes to /usr
+------------------------------
+
+    sudo steamos-readonly disable
+
+
+STEP 2 - remove the compiler toolchain
+--------------------------------------
+
+    sudo pacman -Rs cmake ninja gcc base-devel
+
+These four were added on 10 Aug 2026. Everything else the build needs
+(python3, git) ships with SteamOS and stays.
+
+Add clang and llvm to that line if they are installed - clang came in later,
+for the profile-guided build, and llvm for the --pgo step's llvm-profdata:
+
+    sudo pacman -Rs cmake ninja gcc base-devel clang llvm
+
+
+STEP 3 - OPTIONAL, and the interesting one
+------------------------------------------
+
+SteamOS's real default is not "glibc missing". It is "glibc registered as
+installed, while /usr/include has been stripped from the image" - 504 files
+claimed by the package database, 14 actually on disk. That mismatch is what
+makes
+
+    pacman -S --needed ...
+
+silently install nothing and leave you with compilers and no headers, which
+then fails much later during the build and looks like a different problem.
+
+To reproduce that state:
+
+    sudo rm -rf /usr/include
+
+Recoverable with the same command the instructions already tell you to run:
+
+    sudo pacman -S glibc linux-api-headers
+
+Skip this step if you would rather not. Steps 1 and 2 alone are enough to test
+most of the process.
+
+
+DO NOT REMOVE
+-------------
+
+    glibc
+    linux-api-headers
+
+They show the same install date as the rest, but only because they were
+REINSTALLED to restore the headers. glibc is the system C library. Removing
+the package will brick the Deck. Deleting its headers (step 3) is fine and
+reversible; removing the package is not.
+
+
+AFTER
+-----
+
+Check the reset worked:
+
+    for t in gcc cmake ninja python3; do printf '%-8s ' "$t"; command -v $t || echo MISSING; done
+    ls /usr/include/stdio.h
+
+Expected: gcc, cmake and ninja MISSING; python3 still present; and if you did
+step 3, no stdio.h.
+
+Then tell Claude, and the build instructions get tested from that state.
+
+To put the toolchain back at any time, section 6 of
+~/ringout-build/BUILD-ON-THE-DECK.md has the exact commands. Note it warns
+against --needed and against -Sy / -Syu, both for good reasons.

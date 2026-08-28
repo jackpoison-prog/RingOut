@@ -215,7 +215,14 @@ void cpu_reset(CPUState* cpu) {
     cpu->spr[287] = PPC_GEKKO_PVR;
 }
 
-static u8* resolve_addr(CPUState* cpu, u32 addr, u32* avail) {
+// NOT static, deliberately. LLVM keys an internal-linkage function in a PGO
+// profile as "<source path>;<symbol>", using the path as the compiler received
+// it -- so a static function's counts are recorded under the TRAINING machine's
+// absolute path and match nothing on anyone else's, silently. External linkage
+// makes the key the bare symbol, which is the same everywhere. Visibility is
+// hidden module-wide, so nothing leaves the .so either way.
+u8* resolve_addr(CPUState* cpu, u32 addr, u32* avail);
+u8* resolve_addr(CPUState* cpu, u32 addr, u32* avail) {
     if (addr >= GC_RAM_BASE && addr < GC_RAM_BASE + cpu->ram_size) {
         u32 offset = addr - GC_RAM_BASE;
         *avail = cpu->ram_size - offset;
