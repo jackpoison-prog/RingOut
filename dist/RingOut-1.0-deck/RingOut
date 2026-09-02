@@ -182,6 +182,96 @@ buffer=auto
 CONFIG
 fi
 
+# --- game-data restore ------------------------------------------------------
+# The MODS tab can ask for the disc's own game data to be put back after a
+# character skin has patched root.olk. It only writes the request; the work
+# happens HERE, before the runtime starts, because root.olk is open and mapped
+# for the whole session and rewriting 590 MB underneath a running game is not
+# something a pause menu should attempt.
+#
+# Re-extracting from the player's own image rather than keeping a pristine copy
+# is what stops this feature costing 590 MB of disk on every install for a thing
+# most players never do.
+#
+# This package ships no tools/ directory -- it is prebuilt and carries no
+# toolchain -- so the runtime's own extractor does the work here. It reads
+# more disc formats than the recompiler's extractor anyway.
+RESTORE_REQUEST="$USER_DIR/restore-game-data.request"
+if [ -f "$RESTORE_REQUEST" ]; then
+    RESTORE_ISO="$(head -1 "$RESTORE_REQUEST" 2>/dev/null)"
+    echo "Ring Out: restoring original game data from $RESTORE_ISO"
+    if [ ! -f "$RESTORE_ISO" ]; then
+        echo "  that disc image is not there any more - leaving the game data alone." >&2
+        echo "  put it back, or re-extract it yourself with:" >&2
+        echo "    ./bin/moderngekko-run --extract /path/to/disc.iso ./game" >&2
+        rm -f "$RESTORE_REQUEST"
+    else
+        # Extract beside the real thing and swap, so an interrupted or failed
+        # extraction leaves the playable game/ in place rather than half a disc.
+        rm -rf "$HERE/game.restore-tmp"
+        if "$HERE/bin/moderngekko-run" --extract "$RESTORE_ISO" "$HERE/game.restore-tmp"; then
+            rm -rf "$HERE/game.restore-old"
+            mv "$HERE/game" "$HERE/game.restore-old" &&                 mv "$HERE/game.restore-tmp" "$HERE/game" &&                 rm -rf "$HERE/game.restore-old"
+            # The cached hash describes the file that was just replaced.
+            rm -f "$USER_DIR/game-data-hash.txt"
+            rm -f "$RESTORE_REQUEST"
+            echo "  done - game data matches the disc again."
+        else
+            rm -rf "$HERE/game.restore-tmp"
+            echo "  could not read that disc image - leaving the game data alone." >&2
+            rm -f "$RESTORE_REQUEST"
+        fi
+    fi
+fi
+
+# --- skin install (AFTER restore: restore re-extracts the game, so a skin
+# written before it would be thrown away) -----------------------------------------------------------
+# The MODS tab queues a character skin here rather than writing it itself:
+# root.olk is open and mapped for the whole session. Each line is
+# "<offset> <size> <path to .dtp>", resolved by the game against the container
+# index, so this only has to place bytes -- it does no parsing and cannot pick
+# the wrong slot on its own.
+#
+# Same-size only, by construction: the offset and size came from an entry whose
+# size already matched. A skin that needs the container rebuilt never gets here.
+MOD_INSTALL_REQUEST="$USER_DIR/mod-install.request"
+if [ -f "$MOD_INSTALL_REQUEST" ] && [ -d "$HERE/game" ]; then
+    echo "Ring Out: installing queued skins"
+    if python3 - "$MOD_INSTALL_REQUEST" "$HERE/game/files/root.olk" <<'PYEOF'
+import os, sys
+req, olk = sys.argv[1], sys.argv[2]
+total = os.path.getsize(olk)
+applied = 0
+for line in open(req):
+    line = line.strip()
+    if not line:
+        continue
+    off, size, path = line.split(" ", 2)
+    off, size = int(off), int(size)
+    if not os.path.isfile(path) or os.path.getsize(path) != size:
+        print(f"  skipped {os.path.basename(path)}: size no longer matches its slot")
+        continue
+    if off + size > total:
+        print(f"  skipped {os.path.basename(path)}: outside the archive")
+        continue
+    with open(path, "rb") as f:
+        payload = f.read()
+    with open(olk, "r+b") as f:
+        f.seek(off)
+        f.write(payload)
+    print(f"  installed {os.path.basename(path)}")
+    applied += 1
+print(f"  {applied} skin(s) written")
+PYEOF
+    then
+        # The cached hash describes the file as it was before these writes.
+        rm -f "$USER_DIR/game-data-hash.txt"
+    else
+        echo "  could not install the queued skins" >&2
+    fi
+    rm -f "$MOD_INSTALL_REQUEST"
+fi
+
 # Pick the module that MATCHES the disc in game/, not whatever sorts first.
 # With a US and a PAL module both present, `ls | head -1` chose gGRSEAF while
 # game/ held PAL -- a mismatch the runtime then rejects, for reasons no player

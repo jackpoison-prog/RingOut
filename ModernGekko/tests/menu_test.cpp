@@ -17,6 +17,7 @@
 #include "Common/Config/Config.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/HW/SI/SI_Device.h"
 #include "UICommon/UICommon.h"
 #include "VideoCommon/VideoConfig.h"
 
@@ -38,6 +39,7 @@ int main()
   // on-screen order, so these counts are the same ones a player presses.
   constexpr int kSystemToVideo = 1;
   constexpr int kSystemToAudio = 2;
+  constexpr int kSystemToControls = 3;
 
   if (RecompMenu::IsOpen())
     return 1;
@@ -97,6 +99,44 @@ int main()
   RecompMenu::OnKey(Key::Right);
   if (Config::Get(Config::MAIN_AUDIO_MUTED) == muted_before)
     return 10;
+
+  // CONTROLS tab, third row: the Player 2 pad switch. Worth its own case
+  // because it is the one row in that tab that is not a binding -- the two
+  // above it drive the device picker and Space RESCANS there, so an off-by-one
+  // in the header count would silently turn a port toggle into a device rescan
+  // and the port would never move.
+  RecompMenu::OnEscape();
+  RecompMenu::Toggle();
+  for (int i = 0; i < kSystemToControls; ++i)
+    RecompMenu::OnKey(Key::Right);
+  const auto& port2 = Config::GetInfoForSIDevice(1);
+  // Default is a controller: this is a two-player fighting game and the
+  // packages ship no Dolphin.ini for a player to have configured.
+  if (Config::Get(port2) != SerialInterface::SIDEVICE_GC_CONTROLLER)
+    return 13;
+  RecompMenu::OnKey(Key::Down);   // row 1: Configure (which port)
+  RecompMenu::OnKey(Key::Down);   // row 2: Input Backend
+  RecompMenu::OnKey(Key::Down);   // row 3: Device
+  RecompMenu::OnKey(Key::Down);   // row 4: Player 2 pad
+  RecompMenu::OnKey(Key::Activate);
+  if (Config::Get(port2) != SerialInterface::SIDEVICE_NONE)
+    return 14;
+  // Left/Right must move it too. Every other row in this menu changes with the
+  // arrows, and a row that only answered to Space read as broken.
+  RecompMenu::OnKey(Key::Right);
+  if (Config::Get(port2) != SerialInterface::SIDEVICE_GC_CONTROLLER)
+    return 15;
+
+  // The port selector must not be reachable by the same keystrokes as the pad
+  // switch: they sit three rows apart, and a header-count slip would put the
+  // toggle where the selector is and silently stop the port ever changing.
+  // Walking back up to row 1 and pressing Right switches the port being
+  // configured, and must leave the ATTACHMENT alone.
+  for (int i = 0; i < 3; ++i)
+    RecompMenu::OnKey(Key::Up);
+  RecompMenu::OnKey(Key::Right);
+  if (Config::Get(port2) != SerialInterface::SIDEVICE_GC_CONTROLLER)
+    return 16;
 
   // Escape backs out of the menu, and keys are inert again afterwards.
   RecompMenu::OnEscape();

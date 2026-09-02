@@ -42,6 +42,7 @@
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/FBInfo.h"
+#include "VideoCommon/RecompMods.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModActionData.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 #include "VideoCommon/OpcodeDecoding.h"
@@ -148,7 +149,8 @@ void TextureCacheBase::Invalidate()
 void TextureCacheBase::OnConfigChanged(const VideoConfig& config)
 {
   if (config.bHiresTextures != m_backup_config.hires_textures ||
-      config.bCacheHiresTextures != m_backup_config.cache_hires_textures)
+      config.bCacheHiresTextures != m_backup_config.cache_hires_textures ||
+      RecompMods::Generation() != m_backup_config.recomp_mods_generation)
   {
     HiresTexture::Update();
   }
@@ -259,6 +261,7 @@ void TextureCacheBase::SetBackupConfig(const VideoConfig& config)
   m_backup_config.graphics_mods = config.bGraphicMods;
   m_backup_config.graphics_mod_change_count =
       config.graphics_mod_config ? config.graphics_mod_config->GetChangeCount() : 0;
+  m_backup_config.recomp_mods_generation = RecompMods::Generation();
 }
 
 bool TextureCacheBase::DidLinkedAssetsChange(const TCacheEntry& entry)

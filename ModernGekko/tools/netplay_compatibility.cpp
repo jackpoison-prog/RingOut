@@ -2,6 +2,7 @@
 
 #include "Common/Crypto/SHA1.h"
 #include "Common/Version.h"
+#include "VideoCommon/RecompGameData.h"
 #include "moderngekko/cpu_state.h"
 #include "moderngekko/module_loader.hpp"
 
@@ -78,8 +79,14 @@ std::string CompatibilityFingerprint(const RuntimeConfig &config,
       module = "rejected";
     }
   }
-  return "moderngekko-netplay-6|" + Common::GetScmRevGitStr() + "|" +
+  // Bumped to -7 because the fingerprint gained a field. root.olk is in it
+  // now: a GameBanana character skin rewrites that archive and leaves main.dol
+  // untouched, so on -6 two peers with different skins matched on every field
+  // here and then desynced in play with nothing to explain it. Its contents
+  // reach guest RAM, so they are part of what has to agree.
+  return "moderngekko-netplay-7|" + Common::GetScmRevGitStr() + "|" +
          game.disc_id + "|" + game.dol_sha256 + "|" +
+         RecompGameData::Fingerprint() + "|" +
          std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|" +
          std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" +
          std::to_string(sizeof(CPUState)) + "|" + module;

@@ -3,6 +3,8 @@
 
 #include "VideoCommon/HiresTextures.h"
 
+#include "VideoCommon/RecompMods.h"
+
 #include <memory>
 #include <string>
 #include <string_view>
@@ -85,12 +87,26 @@ void HiresTexture::Update()
   }
 
   const std::string& game_id = SConfig::GetInstance().GetGameID();
-  const std::set<std::string> texture_directories =
+  const std::set<std::string> pack_directories =
       GetTextureDirectoriesWithGameId(File::GetUserPath(D_HIRESTEXTURES_IDX), game_id);
   constexpr auto extensions = std::to_array<std::string_view>({".png", ".dds"});
 
-  for (const auto& texture_directory : texture_directories)
+  // RingOut: enabled mods first, then the HD pack.
+  //
+  // Order IS precedence: the try_emplace below keeps the FIRST copy of any
+  // given texture and drops the rest. Upstream hands back a std::set, so the
+  // winner was whichever path sorted first alphabetically -- fine when there is
+  // only ever one directory, arbitrary once there are several. Walking an
+  // ordered vector instead is what makes "a mod outranks the HD pack" true.
+  std::vector<std::string> texture_directories = RecompMods::EnabledDirectories();
+  const size_t mod_directory_count = texture_directories.size();
+  texture_directories.insert(texture_directories.end(), pack_directories.begin(),
+                             pack_directories.end());
+
+  for (size_t directory_index = 0; directory_index < texture_directories.size(); ++directory_index)
   {
+    const std::string& texture_directory = texture_directories[directory_index];
+    const bool is_mod = directory_index < mod_directory_count;
     // Watch this directory for any texture reloads
     s_file_library->Watch(texture_directory);
 
@@ -136,8 +152,20 @@ void HiresTexture::Update()
 
     if (failed_insert)
     {
-      ERROR_LOG_FMT(VIDEO, "One or more textures at path '{}' were already inserted",
-                    texture_directory);
+      // Overriding is the point of the Mods folder, so this is only an error
+      // for the highest-precedence directory, where nothing could have claimed
+      // the texture first. Anywhere below that it is the documented behaviour
+      // and logging it as an error sends players hunting a bug they don't have.
+      if (directory_index == 0)
+      {
+        ERROR_LOG_FMT(VIDEO, "One or more textures at path '{}' were already inserted",
+                      texture_directory);
+      }
+      else
+      {
+        INFO_LOG_FMT(VIDEO, "Textures at path '{}' were overridden by {}", texture_directory,
+                     is_mod ? "a higher-priority mod" : "an enabled mod");
+      }
     }
   }
 

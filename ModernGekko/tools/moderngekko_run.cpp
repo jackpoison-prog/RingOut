@@ -90,12 +90,32 @@ std::string LibrarySuffix() {
 #endif
 }
 
+#if defined(__linux__)
+// Is this /proc/self/exe the dynamic loader rather than our own binary?
+//
+// It is whenever the process was started as `ld-linux.so <program> <args>`,
+// which is exactly what the launcher does on the bundled-glibc path: it execs
+// the LOADER and passes the runtime as an argument, so the kernel records
+// ld-linux as the executable and /proc/self/exe points into libc-fallback/.
+// Everything derived from it -- the bundled module directory above all -- then
+// looks one directory to the side of where it actually lives.
+bool IsDynamicLoader(const std::filesystem::path &path) {
+  const std::string name = path.filename().string();
+  // ld-linux-x86-64.so.2, ld-linux-aarch64.so.1, ld-2.36.so, ld64.so.2, ...
+  return name.starts_with("ld-") || name.starts_with("ld64.") ||
+         name.starts_with("ld.so");
+}
+#endif
+
 std::filesystem::path ExecutableDirectory(const char *argv0) {
   std::error_code ec;
 #if defined(__linux__)
   const std::filesystem::path proc_executable =
       std::filesystem::read_symlink("/proc/self/exe", ec);
-  if (!ec)
+  // argv[0] is the honest answer when the loader ran us: ld.so is given the
+  // program's full path and passes it through untouched, so falling through
+  // here lands on the real binary rather than on the loader beside it.
+  if (!ec && !IsDynamicLoader(proc_executable))
     return proc_executable.parent_path();
   ec.clear();
 #endif
@@ -346,6 +366,18 @@ int RunMain(int argc, char **argv) {
         module_path = bundled;
       else if (std::filesystem::is_regular_file(user_module))
         module_path = user_module;
+      else {
+        // Name the paths that were tried. The runtime's own refusal is "no
+        // native module was supplied", which is true but reads like the build
+        // produced nothing -- and the report that found the loader bug above
+        // spent its effort establishing that the module HAD been built and was
+        // sitting in bin/ the whole time.
+        std::cerr << "no module named " << module_name << " was found. Looked in:\n"
+                  << "  " << bundled.parent_path().string() << "\n"
+                  << "  " << user_module.parent_path().string() << "\n"
+                  << "Set STATICRECOMP_MODULE to its full path, or pass "
+                     "--module, if it is somewhere else.\n";
+      }
     }
   }
   if (!module_path.empty())
@@ -399,8 +431,13 @@ int RunMain(int argc, char **argv) {
     frontend_config.controllers = options.controllers;
     frontend_config.controller = options.controllers.front();
     std::string controller_message;
+    // Disabled: this list is a per-machine NETPLAY assignment, so a second
+    // local pad must not be mapped to port 2 here. The ordinary launch path
+    // above passes a non-empty list too -- the controller saved in config.ini
+    // -- so only the caller can tell the two apart.
     if (!moderngekko::frontend::EnsureControllerConfig(
-            config.user_directory, options.controllers, &controller_message)) {
+            config.user_directory, options.controllers, &controller_message,
+            moderngekko::frontend::LocalMultiplayer::Disabled)) {
       std::cerr << "controller configuration: " << controller_message << '\n';
       return 2;
     }

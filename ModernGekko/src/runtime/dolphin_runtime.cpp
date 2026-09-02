@@ -25,6 +25,7 @@
 #include "InputCommon/InputConfig.h"
 #include "UICommon/UICommon.h"
 #include "VideoCommon/PerformanceMetrics.h"
+#include "VideoCommon/RecompGameData.h"
 #include "VideoCommon/RecompMenu.h"
 #include "VideoCommon/VideoConfig.h"
 #include "dolphin_runtime_internal.hpp"
@@ -38,6 +39,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <fmt/format.h>
 #include <mutex>
 #include <ranges>
@@ -188,8 +191,29 @@ void RebindPadsToPresentDevices() {
       g_controller_interface.GetAllDeviceStrings();
   // Prefer a real gamepad over the keyboard/pointer pair, which is always
   // present and would otherwise look like a valid answer.
-  const auto gamepad = std::ranges::find_if(
-      available, [](const std::string &d) { return d.starts_with("SDL/"); });
+  std::vector<std::string> gamepads;
+  for (const std::string &device : available) {
+    if (device.starts_with("SDL/"))
+      gamepads.push_back(device);
+  }
+
+  // A device a WORKING port already holds is not available to a broken one.
+  // Without this every absent pad was moved onto the first gamepad in the list,
+  // so on the Deck in Game Mode -- where Steam Input replaces both physical
+  // pads with virtual ones and neither configured name resolves -- ports 1 and
+  // 2 both landed on the same device and drove the same character. A port left
+  // unbound is strictly better than two ports sharing one pad: one player can
+  // still play.
+  std::vector<std::string> taken;
+  for (int i = 0; i < config->GetControllerCount(); ++i) {
+    auto *const pad = config->GetController(i);
+    if (pad == nullptr)
+      continue;
+    const ciface::Core::DeviceQualifier &current = pad->GetDefaultDevice();
+    if (!current.ToString().empty() &&
+        g_controller_interface.FindDevice(current) != nullptr)
+      taken.push_back(current.ToString());
+  }
 
   for (int i = 0; i < config->GetControllerCount(); ++i) {
     auto *const pad = config->GetController(i);
@@ -200,18 +224,82 @@ void RebindPadsToPresentDevices() {
       continue; // port was never configured; nothing to repair
     if (g_controller_interface.FindDevice(current) != nullptr)
       continue; // still there; leave it alone
-    if (gamepad == available.end()) {
+    const auto gamepad =
+        std::ranges::find_if(gamepads, [&taken](const std::string &d) {
+          return std::ranges::find(taken, d) == taken.end();
+        });
+    if (gamepad == gamepads.end()) {
       std::fprintf(stderr,
                    "[input] pad %d is bound to '%s', which is not connected, "
-                   "and no gamepad is available to move it to\n",
+                   "and no unused gamepad is available to move it to\n",
                    i + 1, current.ToString().c_str());
       continue;
     }
     std::fprintf(stderr,
                  "[input] pad %d: '%s' is not connected; rebinding to '%s'\n",
                  i + 1, current.ToString().c_str(), gamepad->c_str());
+    // Measured on the Deck 2026-09-01: this happens when Steam Input replaces
+    // the physical pads with virtual ones, and in that state the pad reads
+    // centred and unpressed however well the rebinding went. Nothing here can
+    // tell a device that will answer from one that will not, so say what fixed
+    // it rather than leaving a silent pad.
+    std::fprintf(stderr,
+                 "[input]   if this pad does nothing in game, turn Steam Input "
+                 "off for this shortcut and relaunch\n");
     pad->SetDefaultDevice(*gamepad);
     pad->UpdateReferences(g_controller_interface);
+    taken.push_back(*gamepad);
+  }
+
+  // A dead pad is SILENT: Dolphin resolves an expression against a device that
+  // does not provide it to nothing at all, and reports neither a warning nor an
+  // error. Three Game Mode rounds were spent guessing at that, so the state
+  // that decides it is now always in the log -- what the emulator can see, and
+  // how much of each pad actually bound.
+  std::fprintf(stderr, "[input] devices dolphin can see:\n");
+  for (const std::string &device : available)
+    std::fprintf(stderr, "[input]   %s\n", device.c_str());
+
+  // The full control list is opt-in: it is ~50 names per device, and it only
+  // matters when a device's controls are suspected of being named differently
+  // from what the profile binds. RINGOUT_INPUT_DEBUG=1 turns it on.
+  for (const std::string &device :
+       std::getenv("RINGOUT_INPUT_DEBUG") != nullptr
+           ? available
+           : std::vector<std::string>{}) {
+    if (!device.starts_with("SDL/"))
+      continue;
+    ciface::Core::DeviceQualifier qualifier;
+    qualifier.FromString(device);
+    const std::shared_ptr<ciface::Core::Device> found =
+        g_controller_interface.FindDevice(qualifier);
+    if (found == nullptr)
+      continue;
+    std::string names;
+    for (const ciface::Core::Device::Input *const input : found->Inputs()) {
+      names += input->GetName();
+      names += ' ';
+    }
+    std::fprintf(stderr, "[input] '%s' controls: %s\n", device.c_str(),
+                 names.c_str());
+  }
+  for (int i = 0; i < config->GetControllerCount(); ++i) {
+    auto *const pad = config->GetController(i);
+    if (pad == nullptr)
+      continue;
+    int refs = 0;
+    int bound = 0;
+    for (auto &group : pad->groups) {
+      for (auto &control : group->controls) {
+        ++refs;
+        if (control->control_ref->BoundCount() > 0)
+          ++bound;
+      }
+    }
+    if (refs == 0)
+      continue;
+    std::fprintf(stderr, "[input] pad %d on '%s': %d of %d controls bound\n",
+                 i + 1, pad->GetDefaultDevice().ToString().c_str(), bound, refs);
   }
 }
 
@@ -251,6 +339,53 @@ std::optional<RuntimeError> ResolveModuleSource(RuntimeConfig &config,
   return {};
 }
 
+// Dolphin's CreateDirectories() already makes Load/Textures/, but nothing
+// creates the two folders a player is actually told to use, and an empty
+// Load/ gives no hint of what belongs in it.
+//
+// GRS/ and not GRSEAF/: GetTextureDirectoriesWithGameId() takes the
+// region-specific directory ONLY if it exists and otherwise falls back to the
+// 3-character ID -- an else, not a union. So creating an empty GRSEAF/ would
+// SHADOW GRS/ and silently kill every region-free pack. Most SoulCalibur II
+// packs are authored against another release (the HDFont pack this was tested
+// with targets GRSEPS, "SC2 Plus"), so the region-free folder is the one that
+// has to exist and the region-specific one must not be created empty.
+void ScaffoldModDirectories(const std::filesystem::path &user_directory) {
+  std::error_code ec;
+  const auto load = user_directory / "Load";
+  std::filesystem::create_directories(load / "Textures" / "GRS", ec);
+  std::filesystem::create_directories(load / "Mods", ec);
+
+  const auto readme = load / "README.txt";
+  if (std::filesystem::exists(readme, ec))
+    return;
+  std::ofstream out(readme, std::ios::trunc);
+  if (!out)
+    return;
+  out << R"(What goes in here
+=================
+
+Textures/GRS/     One HD texture pack, unpacked (the .png files themselves).
+                  GRS is deliberate: it matches any region of the disc, and
+                  most SoulCalibur II packs are built against a release other
+                  than yours. If you make a folder named for your exact disc
+                  (GRSEAF, GRSJAF, GRSPAF) it REPLACES this one rather than
+                  adding to it, so packs sitting in GRS stop loading.
+
+Mods/<name>/      One folder per texture mod. Each shows up in the MODS tab of
+                  the in-game menu (Escape) and can be turned on and off there.
+                  Where a mod and the HD pack replace the same texture, the
+                  mod wins.
+
+Both are read at startup. Turning texture packs off entirely is the Video tab.
+
+Character skins from GameBanana are a different thing: they patch root.olk
+with olkviewer, on disk, and are not listed here. See the MODS tab for whether
+your game data has been modified and what that does to netplay.
+)";
+  out.close();
+}
+
 void InitializeUICommon(const std::filesystem::path &user_directory) {
   UICommon::SetUserDirectory(user_directory.string());
   // Only DolphinQt's main() called this, so running headless/NoGUI left the
@@ -258,6 +393,7 @@ void InitializeUICommon(const std::filesystem::path &user_directory) {
   // anything writing there failed with "failed to create file" -- savestates
   // in particular.
   UICommon::CreateDirectories();
+  ScaffoldModDirectories(user_directory);
   UICommon::Init();
   // Dolphin's default non-Windows alert handler answers "No" to every
   // question, and ASSERT's PanicYesNo treats "No" as "don't ignore" ->
@@ -465,6 +601,13 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
     InitializeUICommon(impl->config.user_directory);
     impl->ui_initialized = true;
   }
+
+  // Before anything can boot or connect: does the extracted game data still
+  // match the disc it came from? Netplay and the MODS tab both read the answer,
+  // and the hash is cached against root.olk's size and mtime so this is only
+  // expensive the first time and after an actual patch.
+  RecompGameData::Initialize(impl->config.game_root.string(),
+                             impl->config.user_directory.string());
 
   impl->platform = CreateHostPlatform(impl->config);
   if (!impl->platform || !impl->platform->Init()) {

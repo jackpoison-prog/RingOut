@@ -1,9 +1,11 @@
 #include "frontend_config.hpp"
 
 #include <algorithm>
+#include <ranges>
 #include <cctype>
 #include <charconv>
 #include <fstream>
+#include <ostream>
 #include <string_view>
 
 #ifndef MODERNGEKKO_NO_SDL_GAMEPADS
@@ -384,8 +386,23 @@ std::vector<std::string> DetectSdlGamepads() {
       if (pad == nullptr)
         continue;
       const char *const name = SDL_GetGamepadName(pad);
-      if (name != nullptr && *name != '\0')
-        devices.push_back("SDL/" + std::to_string(devices.size()) + "/" + name);
+      if (name != nullptr && *name != '\0') {
+        // Dolphin numbers ids per (SOURCE, NAME) pair, NOT per source:
+        // ControllerInterface::AddDevice's is_id_in_use compares source, name
+        // and id together. So two pads of DIFFERENT models are both id 0, and
+        // only two of the SAME model are 0 and 1. Counting sequentially named a
+        // second, differently-modelled pad "SDL/1/<name>" where Dolphin calls
+        // it "SDL/0/<name>" -- a device that does not exist. Dolphin resolves a
+        // binding against an absent device to nothing at all, so the pad would
+        // read centred and unpressed and NOTHING would report an error.
+        const std::string suffix = std::string("/") + name;
+        std::size_t id = 0;
+        for (const std::string &seen : devices) {
+          if (seen.ends_with(suffix))
+            ++id;
+        }
+        devices.push_back("SDL/" + std::to_string(id) + suffix);
+      }
       SDL_CloseGamepad(pad);
     }
     SDL_free(ids);
@@ -396,40 +413,30 @@ std::vector<std::string> DetectSdlGamepads() {
   return devices;
 }
 
-bool WriteGamepadGCPadConfig(const fs::path &user_directory,
-                             std::string_view device, std::string *message) {
-  if (device.empty() ||
-      device.find_first_of("\r\n") != std::string_view::npos) {
-    if (message)
-      *message = "invalid gamepad device name";
-    return false;
-  }
-
-  const fs::path destination = user_directory / "Config" / "GCPadNew.ini";
-  std::error_code ec;
-  fs::create_directories(destination.parent_path(), ec);
-  if (ec) {
-    if (message)
-      *message = "can't create controller config directory: " + ec.message();
-    return false;
-  }
-  std::ofstream output(destination, std::ios::trunc);
-  if (!output) {
-    if (message)
-      *message = "can't write " + destination.string();
-    return false;
-  }
-
-  // Input names are Dolphin's SDL gamepad names (s_sdl_button_names /
-  // s_sdl_axis_names in SDLGamepad.h), not SDL's own constants. The vertical
-  // axes read `Left Y+` for up because that backend already inverts them to
-  // match XInput -- do not "fix" the sign here.
-  //
-  // Face buttons follow the GameCube's physical layout rather than the labels:
-  // A is the big south button, B east. Z sits on the right shoulder because the
-  // GameCube has one Z; L/R are the analog triggers, and are mapped as both
-  // digital and analog so a full press registers as a click.
-  output << "[GCPad1]\n"
+namespace {
+// The default map, emitted for whichever port is being bound.
+//
+// Port 1 and port 2 must get the SAME map. Dolphin's own defaults reach port 1
+// only -- InputConfig::LoadConfig clears the rest so four pads cannot all land
+// on one device -- so whatever port 2 does not get here, a second player has to
+// bind by hand in the CONTROLS tab. Two of these lines cannot be bound by hand
+// at ALL: that tab lists controls, and Calibration is a group setting, not a
+// control. A hand-bound port 2 is therefore stuck with a square stick gate, and
+// in practice a player stops at the buttons and leaves the analog triggers
+// unbound too.
+//
+// Input names are Dolphin's SDL gamepad names (s_sdl_button_names /
+// s_sdl_axis_names in SDLGamepad.h), not SDL's own constants. The vertical
+// axes read `Left Y+` for up because that backend already inverts them to
+// match XInput -- do not "fix" the sign here.
+//
+// Face buttons follow the GameCube's physical layout rather than the labels:
+// A is the big south button, B east. Z sits on the right shoulder because the
+// GameCube has one Z; L/R are the analog triggers, and are mapped as both
+// digital and analog so a full press registers as a click.
+void WriteGCPadSection(std::ostream &output, int port,
+                       std::string_view device) {
+  output << "[GCPad" << port << "]\n"
          << "Device = " << device << '\n'
          << "Buttons/A = `Button S`\n"
             "Buttons/B = `Button E`\n"
@@ -459,15 +466,99 @@ bool WriteGamepadGCPadConfig(const fs::path &user_directory,
             "C-Stick/Right = `Right X+`\n"
             "C-Stick/Calibration = 100.00 141.42 100.00 141.42 100.00 141.42 "
             "100.00 141.42\n";
+}
+
+// True when GCPadNew.ini already has a [GCPad2] section, matched on its own
+// line so a device name that happens to contain the text cannot fake it.
+bool HasGCPad2Section(const fs::path &user_directory) {
+  std::ifstream input(user_directory / "Config" / "GCPadNew.ini");
+  std::string line;
+  while (std::getline(input, line)) {
+    if (Trim(line) == "[GCPad2]")
+      return true;
+  }
+  return false;
+}
+// The device port 1 is bound to, or empty if there is no [GCPad1] Device line.
+// Needed because the detected order is NOT the port order: SDL enumerates in
+// whatever order the devices arrived, so detected[1] is simply "the second pad
+// SDL listed", which on the Steam Deck in Game Mode was the pad port 1 already
+// held. Mapping port 2 onto port 1's device gives both players one pad, which
+// is worse than leaving port 2 alone -- neither of them can then play.
+std::string ReadGCPad1Device(const fs::path &user_directory) {
+  std::ifstream input(user_directory / "Config" / "GCPadNew.ini");
+  std::string line;
+  bool in_port1 = false;
+  while (std::getline(input, line)) {
+    const std::string trimmed = Trim(line);
+    if (trimmed.starts_with("[") && trimmed.ends_with("]")) {
+      in_port1 = trimmed == "[GCPad1]";
+      continue;
+    }
+    if (!in_port1 || !trimmed.starts_with("Device"))
+      continue;
+    const std::size_t equals = trimmed.find('=');
+    if (equals != std::string::npos)
+      return Trim(trimmed.substr(equals + 1));
+  }
+  return {};
+}
+} // namespace
+
+// Writes one section per device: devices[0] drives port 1, devices[1] port 2.
+bool WriteGamepadGCPadConfig(const fs::path &user_directory,
+                             std::span<const std::string> devices,
+                             std::string *message) {
+  if (devices.empty()) {
+    if (message)
+      *message = "no gamepad to map";
+    return false;
+  }
+  for (const std::string &device : devices) {
+    if (device.empty() || device.find_first_of("\r\n") != std::string::npos) {
+      if (message)
+        *message = "invalid gamepad device name";
+      return false;
+    }
+  }
+
+  const fs::path destination = user_directory / "Config" / "GCPadNew.ini";
+  std::error_code ec;
+  fs::create_directories(destination.parent_path(), ec);
+  if (ec) {
+    if (message)
+      *message = "can't create controller config directory: " + ec.message();
+    return false;
+  }
+  std::ofstream output(destination, std::ios::trunc);
+  if (!output) {
+    if (message)
+      *message = "can't write " + destination.string();
+    return false;
+  }
+
+  for (std::size_t i = 0; i < devices.size(); ++i)
+    WriteGCPadSection(output, static_cast<int>(i) + 1, devices[i]);
+
   output.close();
   if (!output) {
     if (message)
       *message = "can't write " + destination.string();
     return false;
   }
-  if (message)
-    *message = "gamepad mapped (" + std::string(device) + ")";
+  if (message) {
+    *message = "gamepad mapped (" + devices[0] + ")";
+    for (std::size_t i = 1; i < devices.size(); ++i)
+      *message += ", port " + std::to_string(i + 1) + " (" + devices[i] + ")";
+  }
   return true;
+}
+
+bool WriteGamepadGCPadConfig(const fs::path &user_directory,
+                             std::string_view device, std::string *message) {
+  const std::string value(device);
+  return WriteGamepadGCPadConfig(
+      user_directory, std::span<const std::string>(&value, 1), message);
 }
 
 bool GenerateControllerConfig(const fs::path &user_directory,
@@ -574,7 +665,7 @@ bool GenerateControllerConfig(const fs::path &user_directory,
 
 bool EnsureControllerConfig(const fs::path &user_directory,
                             std::span<const std::string> controllers,
-                            std::string *message) {
+                            std::string *message, LocalMultiplayer local) {
   // A GameCube title needs GCPadNew.ini, and nothing here ever wrote one. A
   // fresh user directory gets a pad if one is connected and a keyboard
   // otherwise; an existing profile is never touched.
@@ -594,15 +685,29 @@ bool EnsureControllerConfig(const fs::path &user_directory,
   std::vector<std::string> detected;
   if (!GCPadConfigExists(user_directory)) {
     // An explicitly selected pad wins; otherwise ask the hardware.
+    bool from_hardware = false;
     if (controllers.empty()) {
       detected = DetectSdlGamepads();
       controllers = detected;
+      from_hardware = true;
     }
+
+    // A second PHYSICALLY PRESENT pad gets port 2, which now defaults to an
+    // attached controller. Without this the port is attached but blank, so the
+    // game un-greys VS Battle for a player who then has to hand-bind twenty
+    // controls before they can move -- and who cannot reach the stick
+    // calibration at all, because it is not a bindable control. Only from
+    // DETECTED hardware: an explicit list is a netplay controller assignment
+    // and must not be reinterpreted as local two-player. Capped at two, the
+    // ports that are actually attached and all the CONTROLS tab can configure.
+    const std::size_t ports = from_hardware && local == LocalMultiplayer::Enabled
+                                  ? std::min<std::size_t>(controllers.size(), 2)
+                                  : 1;
 
     std::string pad_message;
     const bool wrote_pad =
         !controllers.empty() &&
-        WriteGamepadGCPadConfig(user_directory, controllers.front(),
+        WriteGamepadGCPadConfig(user_directory, controllers.first(ports),
                                 &pad_message);
     if (!wrote_pad)
       WriteKeyboardGCPadConfig(user_directory, KeyboardLayout::Player1,
@@ -610,6 +715,44 @@ bool EnsureControllerConfig(const fs::path &user_directory,
     if (message)
       *message = pad_message;
   }
+  // An existing profile is never rewritten -- but one written before port 2 was
+  // attached has no [GCPad2] at all, which is EVERY install predating it,
+  // including the one the bug was reported from. Appending the section when it
+  // is absent and a second pad is present supplies what was missing without
+  // touching a line the player set.
+  //
+  // Gated on the CALLER saying this is not netplay, NOT on the controller list
+  // being empty. That test was wrong: the ordinary launch path passes the
+  // controller saved in config.ini, so on any install that has been through the
+  // frontend once the list is non-empty and the whole feature silently did
+  // nothing. Measured on the Deck 2026-09-01, two pads attached, same binary,
+  // one line of config.ini apart: with `controller1=Keyboard` no [GCPad2] was
+  // written and Dolphin saved its own five-button stub -- no sticks, no
+  // triggers, no calibration -- and without it, the full map.
+  if (GCPadConfigExists(user_directory) && !HasGCPad2Section(user_directory) &&
+      local == LocalMultiplayer::Enabled) {
+    if (detected.empty())
+      detected = DetectSdlGamepads();
+    // Not detected[1]: that is "the second pad SDL listed", which is only port
+    // 2's pad when the enumeration order happens to match the profile. It did
+    // on the desktop and did NOT on the Deck in Game Mode, where port 2 was
+    // handed port 1's own device. Pick the first detected pad port 1 is not
+    // already using instead, and map nothing when there is no such pad.
+    const std::string port1 = ReadGCPad1Device(user_directory);
+    const auto second = std::ranges::find_if(
+        detected, [&port1](const std::string &d) { return d != port1; });
+    if (detected.size() >= 2 && second != detected.end()) {
+      std::ofstream append(user_directory / "Config" / "GCPadNew.ini",
+                           std::ios::app);
+      if (append) {
+        WriteGCPadSection(append, 2, *second);
+        append.close();
+        if (append && message)
+          *message = "port 2 mapped (" + *second + ")";
+      }
+    }
+  }
+
   if (ControllerConfigExists(user_directory)) {
     if (message && message->empty())
       *message = "using existing controller profile";
@@ -623,9 +766,10 @@ bool EnsureControllerConfig(const fs::path &user_directory,
 }
 
 bool EnsureControllerConfig(const fs::path &user_directory,
-                            std::string_view controller, std::string *message) {
+                            std::string_view controller, std::string *message,
+                            LocalMultiplayer local) {
   const std::string value(controller);
   return EnsureControllerConfig(
-      user_directory, std::span<const std::string>(&value, 1), message);
+      user_directory, std::span<const std::string>(&value, 1), message, local);
 }
 } // namespace moderngekko::frontend

@@ -3,9 +3,13 @@
 
 #include "VideoCommon/RecompMenu.h"
 
+#include "VideoCommon/RecompGameData.h"
+#include "VideoCommon/RecompMods.h"
+
 #include <enet/enet.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <bit>
 #include <chrono>
@@ -43,6 +47,8 @@
 #include "Core/FreeLookManager.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/Memmap.h"
+#include "Core/HW/SI/SI.h"
+#include "Core/HW/SI/SI_Device.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "InputCommon/ControlReference/ControlReference.h"
@@ -111,6 +117,7 @@ enum class Tab
   Audio,
   Controls,
   Cheats,
+  Mods,
   Count,
 };
 
@@ -120,7 +127,13 @@ constexpr int kTabCount = static_cast<int>(Tab::Count);
 // backend to take input from, and which device on it -- in the same way the
 // Cheats tab puts its master switch above the codes. Rebind rows are therefore
 // offset by this much when indexing control_rows.
-constexpr int kControlsHeaderRows = 2;
+// The CONTROLS tab's non-binding rows, in on-screen order: which port is being
+// configured, its backend and device, and whether port 2 is plugged in at all.
+constexpr int kPortRow = 0;
+constexpr int kBackendRow = 1;
+constexpr int kDeviceRow = 2;
+constexpr int kPort2Row = 3;
+constexpr int kControlsHeaderRows = 4;
 
 const char* TabName(Tab tab)
 {
@@ -136,6 +149,8 @@ const char* TabName(Tab tab)
     return "CONTROLS";
   case Tab::Cheats:
     return "CHEATS";
+  case Tab::Mods:
+    return "MODS";
   default:
     return "";
   }
@@ -254,6 +269,8 @@ struct State
   // Row 0 is always the tab selector; rows 1.. are that tab's entries.
   Tab tab = Tab::System;
   std::vector<ControlRow> control_rows;
+  // Port the CONTROLS tab is editing: 0 or 1. Mirrored into s_config_port.
+  int config_port = 0;
 
   // Backend and device selection, shown above the rebind rows. Qualified device
   // strings are "SOURCE/CID/NAME", so the backend is the leading field and no
@@ -269,6 +286,15 @@ struct State
   std::vector<ActionReplay::ARCode> ar_codes;
   std::vector<Gecko::GeckoCode> gecko_codes;
   std::vector<CheatRow> cheat_rows;
+
+  // Texture mods, and whether the game data itself has been patched. Both are
+  // read on entering the tab rather than held live: Scan() walks a directory
+  // and this file never does I/O under the mutex.
+  std::vector<RecompMods::Mod> mod_rows;
+  RecompGameData::State game_data;
+  // Result of the last restore request, shown in place of the hint line so the
+  // player finds out whether it took without leaving the menu.
+  std::string mod_message;
 };
 
 State s_state;
@@ -282,9 +308,52 @@ int RowCount(const State& state)
     return kControlsHeaderRows + static_cast<int>(state.control_rows.size());
   case Tab::Cheats:
     return 1 + static_cast<int>(state.cheat_rows.size());  // master switch + codes
+  case Tab::Mods:
+    // HD pack switch + one row per mod + the game-data line, plus the restore
+    // action only when there is something to undo.
+    return 2 + static_cast<int>(state.mod_rows.size()) +
+           (state.game_data.status == RecompGameData::Status::Modified ? 1 : 0);
   default:
     return static_cast<int>(TabItems(state.tab).size());
   }
+}
+
+// Flips whatever the MODS row at `index` represents. Runs with the state mutex
+// held, so it records what to do rather than doing it: writing Mods.ini and
+// rescanning the folder are file I/O, and this file keeps I/O out from under
+// the lock. The in-memory row is flipped here anyway so the next redraw shows
+// the new value instead of lagging a frame.
+void ToggleModRow(int index, std::string* toggle_name, bool* toggle_enabled, bool* reload,
+                  bool* save_config, int* install_mod)
+{
+  if (index == 0)
+  {
+    const bool on = !Config::Get(Config::GFX_HIRES_TEXTURES);
+    Config::SetBase(Config::GFX_HIRES_TEXTURES, on);
+    *save_config = true;
+    *reload = true;
+    return;
+  }
+
+  const int mod_index = index - 1;
+  if (mod_index < 0 || mod_index >= static_cast<int>(s_state.mod_rows.size()))
+    return;  // the Game data and Restore rows are not toggles
+
+  auto& mod = s_state.mod_rows[mod_index];
+  if (mod.kind == RecompMods::Kind::GameData)
+  {
+    // A skin is written into the game itself, so it is not a switch and cannot
+    // be undone by pressing again -- removing it means restoring the game data.
+    if (mod.installable && !mod.installed)
+      *install_mod = mod_index;
+    return;
+  }
+  if (mod.kind != RecompMods::Kind::Textures)
+    return;  // nothing to switch; the row is showing why
+  mod.enabled = !mod.enabled;
+  *toggle_name = mod.name;
+  *toggle_enabled = mod.enabled;
+  *reload = true;
 }
 
 // Pausing must NOT happen on the host thread. CPUManager::SetStepping(true)
@@ -973,6 +1042,12 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
   case Item::NetplayPort:
     return netplay_mode == 0 ? "-" : std::to_string(netplay_port);
   case Item::NetplayStart:
+    // Short enough to FIT: the value column is only 110*scale wide, and the
+    // full sentence was clipped mid-word ("OFF - GAME DATA MO") against the
+    // panel edge. The reason goes on the hint line instead, the way the MODS
+    // tab already puts its sentence there.
+    if (RecompGameData::NetplayBlocked())
+      return "OFF - MODDED";
     // Deliberately blunt about the cost: this is not a pause-menu toggle, the
     // session has to be built from boot.
     return netplay_mode == 0 ? "-" : "RESTARTS GAME";
@@ -1085,13 +1160,48 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
   }
 }
 
-ControllerEmu::EmulatedController* GetPad()
+// Is a controller plugged into port 2? Reading the config rather than SI so
+// this answers the same before boot and mid-session.
+bool Port2Attached()
+{
+  return Config::Get(Config::GetInfoForSIDevice(1)) != SerialInterface::SIDEVICE_NONE;
+}
+
+// Attach or detach port 2. ChangeDevice schedules the swap through CoreTiming
+// rather than doing it here, which is what makes it safe to call while the menu
+// has the core paused -- the same route Movie.cpp takes when a recording
+// changes what is plugged in.
+void SetPort2Attached(bool attached)
+{
+  const SerialInterface::SIDevices device =
+      attached ? SerialInterface::SIDEVICE_GC_CONTROLLER : SerialInterface::SIDEVICE_NONE;
+  Config::SetBase(Config::GetInfoForSIDevice(1), device);
+  if (Core::IsRunning(Core::System::GetInstance()))
+    Core::System::GetInstance().GetSerialInterface().ChangeDevice(device, 1);
+}
+
+ControllerEmu::EmulatedController* GetPad(int port)
 {
   InputConfig* const config = Pad::GetConfig();
-  if (config == nullptr || config->GetControllerCount() == 0)
+  if (config == nullptr || config->GetControllerCount() <= port || port < 0)
     return nullptr;
-  return config->GetController(0);
+  return config->GetController(port);
 }
+
+// Which port the CONTROLS tab is editing. Mirrored outside the mutex on purpose:
+// the row builders and the input detector all run with it released, and they
+// must act on the same pad the rows were built from.
+std::atomic<int> s_config_port{0};
+
+// The pad being CONFIGURED.
+ControllerEmu::EmulatedController* GetConfiguredPad()
+{
+  return GetPad(s_config_port.load(std::memory_order_relaxed));
+}
+
+// The pad that DRIVES the menu -- always port 1, so opening the tab on port 2
+// never moves navigation out from under the hands holding the first pad.
+ControllerEmu::EmulatedController* GetMenuPad() { return GetPad(0); }
 
 // A qualified device string is "SOURCE/CID/NAME", or "SOURCE//NAME" when the
 // backend does not number its devices, so the backend is everything before the
@@ -1174,7 +1284,7 @@ std::string CycleDevice(const State& state, int direction)
 void BuildDeviceListData(std::vector<std::string>* devices, std::string* current)
 {
   *devices = g_controller_interface.GetAllDeviceStrings();
-  auto* const pad = GetPad();
+  auto* const pad = GetConfiguredPad();
   *current = pad != nullptr ? pad->GetDefaultDevice().ToString() : std::string();
 }
 
@@ -1184,7 +1294,7 @@ void BuildDeviceListData(std::vector<std::string>* devices, std::string* current
 void BuildControlRowsData(std::vector<ControlRow>* rows)
 {
   rows->clear();
-  auto* const pad = GetPad();
+  auto* const pad = GetConfiguredPad();
   if (pad == nullptr)
     return;
 
@@ -1201,7 +1311,7 @@ void BuildControlRowsData(std::vector<ControlRow>* rows)
 
 void StartDetection(State& state, ControllerEmu::Control* control)
 {
-  auto* const pad = GetPad();
+  auto* const pad = GetConfiguredPad();
   if (pad == nullptr || control == nullptr)
     return;
 
@@ -1591,6 +1701,12 @@ Action DecideAction(Item item, State& state, bool* needs_config_save)
     }
     return Action::None;
   case Item::NetplayStart:
+    // Patched game data desyncs against an unmodified peer, so the session is
+    // refused HERE rather than at connect: starting it costs a restart of the
+    // game, and finding out afterwards would mean the player pays that price to
+    // be told no. The MODS tab carries the same sentence next to the cause.
+    if (RecompGameData::NetplayBlocked())
+      return Action::None;
     // Off means the row is inert, so Enter cannot restart the game by accident
     // while somebody is paging past it.
     return state.netplay_mode == 0 ? Action::None : Action::StartNetplay;
@@ -1698,7 +1814,20 @@ void OnKey(Key key)
   bool enable_cheats_master = false;
   bool needs_build_controls = false;
   bool needs_load_cheats = false;
+  bool needs_load_mods = false;
+  // Toggling a mod is a directory rescan away from being visible, and both the
+  // write and the rescan are file I/O -- so the key handler only records what
+  // to do and the work happens once the mutex is released.
+  std::string toggle_mod_name;
+  bool toggle_mod_enabled = false;
+  bool needs_restore_request = false;
+  int install_mod_index = -1;
+  bool needs_texture_reload = false;
   bool needs_refresh_devices = false;
+  // Deferred like every other write here: SetPort2Attached touches the config
+  // system and CoreTiming, neither of which belongs under this file's mutex.
+  bool toggle_port2 = false;
+  bool port2_enabled = false;
   std::string new_device;
   ControllerEmu::Control* changed_pad_control = nullptr;
   std::vector<ActionReplay::ARCode> ar_snapshot;
@@ -1737,6 +1866,8 @@ void OnKey(Key key)
           needs_build_controls = true;
         else if (s_state.tab == Tab::Cheats)
           needs_load_cheats = true;
+        else if (s_state.tab == Tab::Mods)
+          needs_load_mods = true;
         break;
       }
       case Key::Up:
@@ -1833,13 +1964,26 @@ void OnKey(Key key)
         if (s_state.tab == Tab::Controls)
         {
           const int control_index = index - kControlsHeaderRows;
-          if (index == 0)
+          if (index == kPortRow)
+          {
+            s_state.config_port = s_state.config_port == 0 ? 1 : 0;
+            s_config_port.store(s_state.config_port, std::memory_order_relaxed);
+            // The rows below belong to the OTHER pad now, so they have to be
+            // rebuilt -- and that touches InputConfig, so it waits for unlock.
+            needs_build_controls = true;
+          }
+          else if (index == kBackendRow)
           {
             new_device = CycleBackend(s_state, dir);
           }
-          else if (index == 1)
+          else if (index == kDeviceRow)
           {
             new_device = CycleDevice(s_state, dir);
+          }
+          else if (index == kPort2Row)
+          {
+            toggle_port2 = true;
+            port2_enabled = !Port2Attached();
           }
           // Left clears a binding; the engine-side refresh happens after unlock.
           else if (key == Key::Left && control_index >= 0 &&
@@ -1853,6 +1997,14 @@ void OnKey(Key key)
           // state, so it updates here or the row would lag a frame behind.
           if (!new_device.empty())
             s_state.device_current = new_device;
+        }
+        else if (s_state.tab == Tab::Mods)
+        {
+          // Left/Right toggles the same rows Space does. Everything else in
+          // this menu changes a value with the arrows, and a row that only
+          // answered to Space read as broken.
+          ToggleModRow(index, &toggle_mod_name, &toggle_mod_enabled,
+                       &needs_texture_reload, &needs_config_save, &install_mod_index);
         }
         else if (s_state.tab != Tab::Cheats)
         {
@@ -1869,8 +2021,19 @@ void OnKey(Key key)
           // On either header row, Space re-scans instead of rebinding: a pad
           // plugged in after the menu opened is otherwise invisible until the
           // tab is left and re-entered.
-          if (index < kControlsHeaderRows)
+          if (index == kPortRow)
+          {
+            s_state.config_port = s_state.config_port == 0 ? 1 : 0;
+            s_config_port.store(s_state.config_port, std::memory_order_relaxed);
+            needs_build_controls = true;
+          }
+          else if (index == kBackendRow || index == kDeviceRow)
             needs_refresh_devices = true;
+          else if (index == kPort2Row)
+          {
+            toggle_port2 = true;
+            port2_enabled = !Port2Attached();
+          }
           else if (control_index < static_cast<int>(s_state.control_rows.size()))
             StartDetection(s_state, s_state.control_rows[control_index].control);
         }
@@ -1893,6 +2056,14 @@ void OnKey(Key key)
           gecko_snapshot = s_state.gecko_codes;
           needs_cheat_apply = true;
           needs_config_save = true;
+        }
+        else if (s_state.tab == Tab::Mods)
+        {
+          if (index == 1 + static_cast<int>(s_state.mod_rows.size()) + 1)
+            needs_restore_request = true;
+          else
+            ToggleModRow(index, &toggle_mod_name, &toggle_mod_enabled,
+                         &needs_texture_reload, &needs_config_save, &install_mod_index);
         }
         else
         {
@@ -1944,8 +2115,60 @@ void OnKey(Key key)
     s_state.cheat_rows = std::move(cheat_rows);
   }
 
+  if (!toggle_mod_name.empty())
+    RecompMods::SetEnabled(toggle_mod_name, toggle_mod_enabled);
+
+  if (install_mod_index >= 0)
+  {
+    RecompMods::Mod mod;
+    {
+      std::lock_guard<std::mutex> guard(s_state.mutex);
+      if (install_mod_index < static_cast<int>(s_state.mod_rows.size()))
+        mod = s_state.mod_rows[install_mod_index];
+    }
+    std::string message;
+    if (!mod.name.empty())
+      RecompMods::RequestInstall(mod, &message);
+    std::lock_guard<std::mutex> guard(s_state.mutex);
+    s_state.mod_message = std::move(message);
+  }
+
+  if (needs_restore_request)
+  {
+    std::string message;
+    RecompGameData::RequestRestore(&message);
+    std::lock_guard<std::mutex> guard(s_state.mutex);
+    s_state.mod_message = std::move(message);
+  }
+
+  if (needs_load_mods)
+  {
+    auto mods = RecompMods::Scan();
+    auto data = RecompGameData::Get();
+    std::lock_guard<std::mutex> guard(s_state.mutex);
+    s_state.mod_rows = std::move(mods);
+    s_state.game_data = std::move(data);
+    // A stale result from a previous visit would sit there claiming something
+    // about state that has since changed. An install message from THIS visit is
+    // not stale, so only entering the tab clears it.
+    if (install_mod_index < 0 && !needs_restore_request)
+      s_state.mod_message.clear();
+  }
+
+  // Nothing to do on this thread: the texture cache reloads on the video thread
+  // when it next sees the generation move. Kept as an explicit flag so the
+  // reason the toggle takes effect is visible at the call site rather than
+  // being an invisible side effect of SetEnabled.
+  static_cast<void>(needs_texture_reload);
+
   // Re-scan, then re-read: RefreshDevices is what picks up a pad plugged in
   // while the menu was already open.
+  if (toggle_port2)
+  {
+    SetPort2Attached(port2_enabled);
+    needs_config_save = true;
+  }
+
   if (needs_refresh_devices)
   {
     g_controller_interface.RefreshDevices();
@@ -1962,7 +2185,7 @@ void OnKey(Key key)
   // UpdateReferences rather than the single-reference call used for a rebind.
   if (!new_device.empty())
   {
-    if (auto* const pad = GetPad())
+    if (auto* const pad = GetConfiguredPad())
     {
       pad->SetDefaultDevice(new_device);
       pad->UpdateReferences(g_controller_interface);
@@ -1973,7 +2196,7 @@ void OnKey(Key key)
 
   if (changed_pad_control != nullptr)
   {
-    if (auto* const pad = GetPad())
+    if (auto* const pad = GetConfiguredPad())
     {
       pad->UpdateSingleControlReference(g_controller_interface,
                                         changed_pad_control->control_ref.get());
@@ -2210,6 +2433,7 @@ void Draw()
   bool detecting;
   bool editing_address = false;
   bool cheats_enabled = false;
+  std::string mod_message;
   // label, value, highlight-value-green
   std::vector<std::tuple<std::string, std::string, bool>> rows;
 
@@ -2231,16 +2455,72 @@ void Draw()
       // Read from the snapshot rather than the pad, so Draw stays off
       // InputConfig while holding the menu mutex.
       const bool has_device = !s_state.device_current.empty();
+      // Which player the rows below belong to. Dolphin gives DEFAULT BINDINGS
+      // TO PORT 1 ONLY -- InputConfig::LoadConfig clears the rest, so that four
+      // pads do not all land on one device -- which means port 2 starts blank
+      // and is unusable until it is bound here. Attaching it without this row
+      // would unlock VS Battle for a player who then cannot move.
+      rows.emplace_back("Configure", s_state.config_port == 0 ? "PORT 1" : "PORT 2", false);
       rows.emplace_back("Input Backend", has_device ? DeviceSource(s_state.device_current) : "-",
                         false);
       rows.emplace_back("Device", has_device ? DeviceName(s_state.device_current) : "none found",
                         false);
+      const bool port2 = Port2Attached();
+      rows.emplace_back("Player 2 pad", port2 ? "ON" : "OFF", port2);
       for (const auto& row : s_state.control_rows)
       {
         std::string value = row.control->control_ref->GetExpression();
         if (value.empty())
           value = "-";
         rows.emplace_back(row.label, std::move(value), false);
+      }
+      break;
+    }
+    case Tab::Mods:
+    {
+      const bool packs_on = Config::Get(Config::GFX_HIRES_TEXTURES);
+      rows.emplace_back("HD texture pack", packs_on ? "ON" : "OFF", packs_on);
+      for (const auto& mod : s_state.mod_rows)
+      {
+        // Only a texture mod is a switch. A skin unpacked from a .rar is shown
+        // with what it actually needs instead of an OFF that would never move.
+        if (mod.kind == RecompMods::Kind::Textures)
+          rows.emplace_back("  " + mod.name, mod.enabled ? "ON" : "OFF", mod.enabled);
+        else if (mod.kind == RecompMods::Kind::GameData && mod.installed)
+          rows.emplace_back("  " + mod.name, "INSTALLED", true);
+        else if (mod.kind == RecompMods::Kind::GameData && mod.installable)
+          rows.emplace_back("  " + mod.name, "INSTALL", false);
+        else
+          rows.emplace_back("  " + mod.name, mod.note, false);
+      }
+
+      // Not a toggle -- a fact about the files on disk. It sits with the mods
+      // because this is where a player who has just installed a skin will look
+      // for it, and because it is the reason netplay may have gone away.
+      const auto& data = s_state.game_data;
+      const char* value = "?";
+      switch (data.status)
+      {
+      case RecompGameData::Status::Pristine:
+        value = "ORIGINAL";
+        break;
+      case RecompGameData::Status::Modified:
+        value = "MODIFIED";
+        break;
+      case RecompGameData::Status::Unknown:
+        value = "UNKNOWN";
+        break;
+      }
+      rows.emplace_back("Game data", value,
+                        data.status == RecompGameData::Status::Pristine);
+      // The status word alone does not tell a player why netplay vanished, so
+      // the sentence goes where the key hint would be. A result from an actual
+      // restore request outranks it.
+      mod_message = s_state.mod_message.empty() ? data.detail : s_state.mod_message;
+      if (data.status == RecompGameData::Status::Modified)
+      {
+        rows.emplace_back("Restore original game data",
+                          data.restorable ? "on next launch" : "disc image missing", false);
       }
       break;
     }
@@ -2327,6 +2607,9 @@ void Draw()
       if (tab == Tab::Cheats)
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
                            "  add codes to GameSettings/GRSEAF.ini");
+      if (tab == Tab::Mods)
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+                           "  put texture mods in Load/Mods/<name>/");
     }
 
     for (size_t i = 0; i < rows.size(); ++i)
@@ -2359,6 +2642,9 @@ void Draw()
     ImGui::Spacing();
     ImGui::Separator();
 
+    // Read outside the state mutex on purpose: it takes its own, and nothing
+    // above still holds ours here.
+    const bool netplay_blocked = RecompGameData::NetplayBlocked();
     const char* hint = "Up/Down select   Left/Right change   Space confirm   Esc close";
     if (detecting)
       hint = "Press a key or button...   Esc cancel";
@@ -2366,12 +2652,27 @@ void Draw()
       hint = "Left/Right octet   Up/Down value   Space done";
     else if (tab_focused)
       hint = "Left/Right switch tab   Down enter list   Esc close";
-    else if (tab == Tab::Controls && selected >= 1 && selected <= kControlsHeaderRows)
+    else if (tab == Tab::Controls && selected == kPortRow + 1)
+      hint = "Left/Right switch player   the rows below bind that pad   Esc close";
+    else if (tab == Tab::Controls && selected == kPort2Row + 1)
+      hint = "Space toggle   off means one-player only   Esc close";
+    else if (tab == Tab::Controls && selected >= kBackendRow + 1 &&
+             selected <= kDeviceRow + 1)
       hint = "Left/Right change   Space rescan devices   Esc close";
     else if (tab == Tab::Controls)
       hint = "Space rebind   Left clear   Up/Down select   Esc close";
     else if (tab == Tab::Cheats)
       hint = "Space toggle   Up/Down select   Esc close";
+    else if (tab == Tab::Mods)
+      hint = "Space toggle   Up/Down select   Esc close";
+    // The row can only say "OFF - MODDED" in the space it has, so the sentence
+    // that explains it goes here whenever the cursor is on that row.
+    else if (tab == Tab::System && netplay_blocked && selected >= 1 &&
+             selected <= static_cast<int>(TabItems(tab).size()) &&
+             TabItems(tab)[selected - 1] == Item::NetplayStart)
+      hint = "Game data is modified -- restore it in MODS to play online.";
+    if (tab == Tab::Mods && !mod_message.empty())
+      hint = mod_message.c_str();
     ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.65f, 1.0f), "%s", hint);
   }
   ImGui::End();
@@ -2407,7 +2708,7 @@ void UpdateDetection()
   if (control == nullptr || results.empty())
     return;
 
-  auto* const pad = GetPad();
+  auto* const pad = GetConfiguredPad();
   if (pad == nullptr)
     return;
 
@@ -2437,7 +2738,7 @@ void UpdateDetection()
 // gamepad": if the player remapped it, that is still the one in their hands.
 void PollMenuGamepad()
 {
-  ControllerEmu::EmulatedController* const pad = GetPad();
+  ControllerEmu::EmulatedController* const pad = GetMenuPad();
   if (pad == nullptr)
     return;
   const auto device = g_controller_interface.FindDevice(pad->GetDefaultDevice());

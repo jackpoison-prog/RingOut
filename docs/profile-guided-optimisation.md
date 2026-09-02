@@ -48,6 +48,61 @@ Two independent reasons, and the first one is fatal on most Linux installs:
    user's log shows exactly this: `function control flow change detected (hash
    mismatch) mem_write64_slow … count discarded`.
 
+### Training on an older clang is worse than shipping no profile
+
+The obvious escape from reason 1 is to train the shipped profile with an *old*
+clang, since an old format is readable by every newer LLVM. It works as
+advertised on the format axis and fails completely on the second one. Measured
+2026-08-28 rather than reasoned about, and the second reason above is no longer
+an inference.
+
+Both profiles were trained here on the same generated sources and the same 6000
+frames of `arcade-match.txt`, each merged by its own `llvm-profdata`; all three
+modules were then built by **clang 22** with `-march=x86-64-v3` and LTO on. The
+Debian 12 container was mounted at the repository's own absolute path, so a
+profile key that carries a source path could not be the reason for a miss.
+
+| arm | mean Gcyc, 6 reps | vs none | insn | IPC | `.text` |
+| --- | --- | --- | --- | --- | --- |
+| no profile | 170.71 | — | 426.1 G | 2.496 | 20.6 MB |
+| clang-22-trained | 151.26 | **−11.39%** | 394.6 G | 2.608 | 36.4 MB |
+| clang-14-trained | 177.69 | **+4.09%** | 418.1 G | 2.353 | 56.9 MB |
+
+Ranges do not overlap (the clang-14 arm's *best* run, 176.85, is worse than the
+unprofiled arm's *worst*, 171.39), spreads 0.8–1.3%, and all 18 runs hashed
+`3883783411fe`, so every arm executed identical emulated work. The
+clang-22-trained arm reproducing the documented −11.4% is the control.
+
+**Why it inverts.** Compare the CFG hash each profile recorded for each of the
+181 functions:
+
+* **35 match** — every one a runtime helper (`mem_read*_slow`,
+  `ppc_fprf_materialize`, `ppc_host_call`, `chassis_dispatch`, …).
+* **146 mismatch** — including **all 132 chunk functions**, without exception.
+
+The chunks are the generated guest code and hold essentially all the cycles, so
+their counts are discarded and they are optimised blind. The helpers keep their
+counts and are marked hot, and a hot helper gets inlined into its call sites —
+which are spread through all 132 unprofiled chunks. The module grows to
+**56.9 MB of `.text`, 2.8× unprofiled and 1.6× the properly profiled build**,
+and the machine then stalls on it: the clang-14 arm retires **fewer**
+instructions than the unprofiled one (418.1 G vs 426.1 G) while taking **more**
+cycles, and IPC falls 2.496 → 2.353. It is not doing more work; it is waiting.
+That is the front-end starvation `docs/measuring.md` puts at 2.4% of cycles,
+made much worse on purpose.
+
+So the trade is the worst available one: all of PGO's code growth, aimed at the
+one part of the module that has no profile to justify it, and none of its win.
+
+**Neither existing guard catches this.** `MODULE_PGO_USABLE` probes only whether
+`-fprofile-use` accepts the file, and the total-count check only rejects an
+all-cold profile. A cross-version profile passes both and quietly builds a
+module 4% slower than no profile. Nothing shipping is exposed today — `--pgo`
+trains with the player's own clang, so its hashes match by construction, and the
+v13 files that ship are simply refused by older clang, which falls back safely.
+The exposure would only be created by shipping an old-clang profile, which is
+what this measurement rules out.
+
 ### Function names carried a path, and no flag fixed it
 
 LLVM keys an **internal-linkage** function as `<source path>;<symbol>`, using

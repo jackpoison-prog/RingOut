@@ -148,6 +148,12 @@ add_library(videocommon
   Present.h
   RecompMenu.cpp
   RecompMenu.h
+  RecompGameData.cpp
+  RecompGameData.h
+  RecompOlk.cpp
+  RecompOlk.h
+  RecompMods.cpp
+  RecompMods.h
   RenderState.cpp
   RenderState.h
   Resources/CustomResourceManager.cpp

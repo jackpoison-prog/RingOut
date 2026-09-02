@@ -276,6 +276,37 @@ if [ -z "$DISC_ID" ]; then
 fi
 echo "    disc id: $DISC_ID"
 
+# Record what came off the disc, so the game can later tell whether root.olk is
+# still that. Character skins (the GameBanana ones) patch root.olk in place with
+# olkviewer and leave main.dol alone, which is exactly the case the netplay
+# fingerprint could not see before: two peers matched on every field and then
+# desynced in play. This baseline is what makes the MODS tab able to say
+# "modified" rather than guess, and it names the image so the original can be
+# put back without keeping a second 590 MB copy of it.
+#
+# SHA-1, not SHA-256: this answers "did these bytes change", and it is the
+# digest the runtime already has a hardware-accelerated path for.
+OLK="$HERE/game/files/root.olk"
+if [ -f "$OLK" ] && command -v sha1sum >/dev/null 2>&1; then
+    mkdir -p "$HERE/userdata"
+    OLK_HASH="$(sha1sum "$OLK" | cut -d" " -f1)"
+    # An absolute path, because the request is acted on from the launcher, whose
+    # working directory is not this one.
+    ISO_ABS="$(cd "$(dirname "$ISO")" && pwd)/$(basename "$ISO")"
+    {
+        echo "# Written by setup.sh. Deleting this only costs you the ability"
+        echo "# to detect and undo a game-data mod; the game runs either way."
+        echo "[Origin]"
+        echo "GameDataHash = $OLK_HASH"
+        echo "SourceImage = $ISO_ABS"
+    } > "$HERE/userdata/disc-origin.txt"
+    # The cached hash belongs to the OLD root.olk if one was there before.
+    rm -f "$HERE/userdata/game-data-hash.txt" "$HERE/userdata/restore-game-data.request"
+    echo "    game data: baseline recorded"
+else
+    echo "    game data: no baseline (sha1sum missing) -- mod detection stays off"
+fi
+
 echo "==> 2/$NSTAGES  Recompiling the game executable (several minutes)"
 rm -rf "$HERE/work"
 mkdir -p "$HERE/work"

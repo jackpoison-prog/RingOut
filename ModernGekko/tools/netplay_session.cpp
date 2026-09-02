@@ -35,6 +35,7 @@
 #include "Core/HW/GCPad.h"
 #include "Core/Config/NetplaySettings.h"
 #include "Core/NetPlay/NetPlayClient.h"
+#include "VideoCommon/RecompGameData.h"
 #include "Core/NetPlay/NetPlayServer.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "UICommon/GameFile.h"
@@ -903,6 +904,13 @@ int RunNetplayLobby(RuntimeConfig runtime_config, ConfigResult frontend_config,
   // does -- same disc, module built by different tools. Without it the mismatch
   // surfaced as a 30-second wait and "no start signal arrived", which told the
   // joining player nothing about what was wrong.
+  // Hash the game data HERE and not only in Runtime::Create: the fingerprint is
+  // taken at connect time, which is long before the runtime exists. Left to the
+  // runtime, both peers would fingerprint an un-hashed "unknown", match each
+  // other, and the root.olk field would protect nobody.
+  RecompGameData::Initialize(runtime_config.game_root.string(),
+                             runtime_config.user_directory.string());
+
   NetPlay::SetGameIdentity(inspected.metadata->disc_id,
                            CompatibilityFingerprint(runtime_config, *inspected.metadata));
 

@@ -169,8 +169,14 @@ const Info<SerialInterface::SIDevices>& GetInfoForSIDevice(int channel)
   static const std::array<const Info<SerialInterface::SIDevices>, 4> infos{
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice0"},
                                        SerialInterface::SIDEVICE_GC_CONTROLLER},
+      // RingOut: port 2 has a controller by default, where stock Dolphin leaves
+      // it empty. This is a two-player fighting game and the packages ship no
+      // Dolphin.ini -- userdata/Config is asserted out of both stages -- so a
+      // default is the only way a second pad works out of the box. A player's
+      // own saved value still wins, which is what the CONTROLS tab writes when
+      // the port is switched off.
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice1"},
-                                       SerialInterface::SIDEVICE_NONE},
+                                       SerialInterface::SIDEVICE_GC_CONTROLLER},
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice2"},
                                        SerialInterface::SIDEVICE_NONE},
       Info<SerialInterface::SIDevices>{{System::Main, "Core", "SIDevice3"},

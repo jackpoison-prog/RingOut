@@ -4,6 +4,7 @@
 #include "VideoCommon/Fifo.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 
 #include "Common/Assert.h"
@@ -324,6 +325,13 @@ void FifoManager::RunGpuLoop()
 
             u32 cyclesExecuted = 0;
             u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
+            // Snapshot the FIFO this batch belongs to. RunFifo() below can run
+            // for a long time -- a cold pipeline compile is the extreme case --
+            // and the CPU thread reconfigures these registers when the game
+            // swaps GX FIFOs on a scene change. Writing our pointer back
+            // afterwards would then clobber the new configuration.
+            const u32 batch_base = fifo.CPBase.load(std::memory_order_relaxed);
+            const u32 batch_end = fifo.CPEnd.load(std::memory_order_relaxed);
             ReadDataFromFifo(readPtr);
 
             if (readPtr == fifo.CPEnd.load(std::memory_order_relaxed))
@@ -343,12 +351,47 @@ void FifoManager::RunGpuLoop()
             m_video_buffer_read_ptr = OpcodeDecoder::RunFifo(
                 DataReader(m_video_buffer_read_ptr, write_ptr), &cyclesExecuted);
 
-            fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
-            fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
-            if ((write_ptr - m_video_buffer_read_ptr) == 0)
+            // Only write back into the FIFO this batch actually came from.
+            //
+            // Measured on a Steam Deck 2026-09-02: entering a fight, the game
+            // swaps to a large FIFO and back while RunFifo() is stalled inside a
+            // first-time pipeline compile. The stale write-back then left
+            // rd=0x614180 (inside the OLD buffer) against base=0x712520
+            // end=0x722500 of the new one, with distance 0 -- so the GPU had
+            // nothing to draw and the read pointer could never reach the write
+            // pointer, being in a different buffer entirely. No commands
+            // consumed means no PE_FINISH, so the game's render thread never
+            // woke, every thread blocked, and the guest sat in its OS idle loop
+            // forever: black screen, audio still playing, emulator healthy.
+            const bool same_fifo = fifo.CPBase.load(std::memory_order_relaxed) == batch_base &&
+                                   fifo.CPEnd.load(std::memory_order_relaxed) == batch_end;
+            if (same_fifo)
             {
-              fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
-                                           std::memory_order_relaxed);
+              fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
+              fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE,
+                                                 std::memory_order_seq_cst);
+              if ((write_ptr - m_video_buffer_read_ptr) == 0)
+              {
+                fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),
+                                             std::memory_order_relaxed);
+              }
+            }
+            else
+            {
+              // stderr rather than WARN_LOG_FMT: Dolphin's log categories are
+              // off in the configuration this occurs in, so a log-manager
+              // message would be invisible exactly when it matters. Rate
+              // limited because a single trip into a fight trips it three or
+              // four times -- enough to prove it happened, not enough to drown
+              // the launcher log.
+              static std::atomic<int> reported{0};
+              if (reported.fetch_add(1, std::memory_order_relaxed) < 3)
+              {
+                std::fprintf(stderr,
+                             "[fifo] reconfigured mid-batch (base %08x->%08x); dropped a stale "
+                             "read-pointer write-back\n",
+                             batch_base, fifo.CPBase.load(std::memory_order_relaxed));
+              }
             }
 
             command_processor.SetCPStatusFromGPU();

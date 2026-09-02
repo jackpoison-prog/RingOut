@@ -441,6 +441,9 @@ private:
     bool arbitrary_mipmap_detection;
     bool graphics_mods;
     u32 graphics_mod_change_count;
+    // RingOut: which texture mods are enabled. Not derived from VideoConfig,
+    // because turning a mod on changes no config value -- see RecompMods.h.
+    u32 recomp_mods_generation;
   };
   BackupConfig m_backup_config = {};
 

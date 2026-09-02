@@ -9,6 +9,12 @@ emulation around it.
 **No game data and no game code are distributed here.** You supply a disc image you
 already own; setup extracts it and recompiles it on your machine.
 
+> **This is still early.** Expect rough edges: the game is playable start to
+> finish, but features arrive before their polish does, and something that worked
+> last release can break in the next one. Polish is planned throughout rather
+> than saved up for a 1.0 — and bug reports genuinely help, because most of what
+> gets fixed here was found by someone hitting it.
+
 ---
 
 ## Status
@@ -50,8 +56,8 @@ Two packages, from the [Releases](../../releases) page:
 
 | | for | needs a toolchain? |
 | --- | --- | --- |
-| `RingOut-1.1-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
-| `RingOut-1.1-steamdeck-x86_64.zip` | Steam Deck / SteamOS | no — prebuilt |
+| `RingOut-1.4-linux-x86_64.zip` | desktop Linux | yes — compiles on your machine |
+| `RingOut-1.4-steamdeck-x86_64.zip` | Steam Deck / SteamOS | only to build a module |
 
 The Deck package ships no module: build one on a desktop with the package below,
 then copy `game/` and `bin/gGRSEAF_recomp.so` across. Add `RingOut` to Steam as a
@@ -80,26 +86,52 @@ straight away. You can also pass the image directly:
 - A working Vulkan driver
 - ~1.5 GB free for the extracted disc and build output
 
-The release binary is built on **glibc 2.44**. For older hosts the launcher falls
-back to a bundled glibc in `libc-fallback/` — see [Known issues](#known-issues)
-before relying on that.
+The release binary is built in a Debian 12 container and needs **glibc 2.36**,
+which every current distro clears — so the bundled glibc in `libc-fallback/` is
+a fallback almost nobody takes. (This page previously said 2.44, which was the
+glibc of the machine the runtime used to be built on. The launcher believed the
+same number and sent every host between 2.36 and 2.44 down the bundled path for
+no reason, where the Vulkan loader then finds no driver. Both are fixed, and
+packaging now fails if the two disagree.)
 
 ---
 
 ## Features
 
-- **Static recompilation** — native x86-64 execution, no interpreter fallback
+- **Static recompilation** — native x86-64 execution; every block of the game's own
+  executable is recompiled, with the interpreter left only the OS exception
+  vectors (0.2% of cycles — see [Status](#status))
 - **Vulkan renderer** with internal-resolution scaling, AA, anisotropic filtering
 - **Widescreen (16:9)** — `Alt+W`
-- **HD texture pack support** — drop a pack in `userdata/Load/Textures/GRSEAF/`
+- **Any region** — US, Japanese and PAL discs all recompile. The OS idle loop is
+  found in *your* disc rather than assumed, so a new region needs no new constant,
+  and each ships its own cheat list and PGO profile
+- **Reads the disc formats the file picker offers** — `.iso`, `.gcm`, `.wbfs`,
+  `.rvz`, `.gcz`, `.wia` and NKit variants
+- **HD texture pack support** — drop a pack in `userdata/Load/Textures/GRS/`
+  (`GRS` matches any region; a folder named for your exact disc replaces it
+  rather than adding to it)
+- **Mods** — drop the `.rar`/`.zip` you downloaded into `userdata/Load/Mods/` and
+  it is unpacked and listed in the MODS tab under the archive's name. Texture
+  mods toggle on and off and outrank the HD pack; character skins are written
+  into the game itself, and are installed from the same tab when their data
+  matches the slot it replaces
+- **Knows when the game data has been modified** — a skin patches the disc's own
+  archive, which no emulator can see, so the game hashes it against what came off
+  your disc. Netplay is refused while it differs, with the reason on screen, and
+  the original is restored from your own disc image on request
 - **In-game overlay**: pause menu with staged settings and Reset Game; Video, Audio,
-  System, Controls and Cheats tabs
+  System, Controls, Cheats and Mods tabs
 - **Full controller remapping**
 - **Save states** — `Shift+F1`–`F8` to save, `F1`–`F8` to load
 - **Free camera** — fly the camera anywhere in a match
 - **FMV playback** via FFmpeg, replacing the software Sofdec decoder
-- **23 verified cheat codes** shipped in `GameSettings/GRSEAF.ini`
-- **Netplay** — rollback, lobby with live ping and per-player game status
+- **Cheat codes for all three regions** in `GameSettings/`, none enabled until you
+  say so. The US and Japanese lists were checked code by code for this project;
+  the PAL one is the list Dolphin already shipped and nobody could see
+- **Netplay** — rollback, lobby with live ping and per-player game status. A peer
+  holding a different disc, a differently built module or modified game data is
+  refused at connect and told which, rather than timing out with no explanation
 - **Its own icon** — the disc banner and the memory-card icon are extracted from
   your disc and saves on your machine, and a desktop entry is written for you.
   None of that artwork ships; it is the publisher's.
@@ -163,12 +195,22 @@ and each one looks plausible enough to be retried:
 | Leaders-only entry labels | 81% of execution fell out to the interpreter |
 | Block-local register allocation | tied; no cross-iteration residency to exploit |
 | CR / XER[CA] elision | ceiling ~0.05% and ~0.2% respectively |
+| Optical-flow frame generation | needs 120Hz+; halves speed with V-Sync on, +8.3ms latency |
 
 PGO was itself in the rejected table for a long time — "does not build, SIGBUS
 before the first frame". That was true when it was written and is not any more.
 It is now the largest single win here, and the details, including the several
 ways it silently does nothing, are in
 [docs/profile-guided-optimisation.md](docs/profile-guided-optimisation.md).
+
+Frame generation is the odd one out: it works, and the shader does what it
+says. It is rejected on physics rather than on codegen. Presenting a synthesised
+midpoint costs a second present, which on a 60Hz panel means a second vblank and
+therefore emulation at 30 FPS; turning V-Sync off restores 60 but tears. It also
+adds ~8.3ms of input latency, because a midpoint cannot exist until both of its
+endpoints do — a poor trade in a fighting game. It would need a 120Hz+ display
+to have a spare refresh to live in, and every panel this project runs on is
+60Hz. Kept on the `framegen` branch rather than deleted.
 
 The pattern among the rest: BOLT, `-O2` and the LLVM backend all bought
 instruction locality or fewer dispatches, and all three lost by retiring more
@@ -180,16 +222,75 @@ back end is saturated at IPC 1.92. The workload is not inefficient, just large:
 
 ---
 
+## What's next
+
+Ordered by how much they would help, not by effort. Nothing here is promised.
+
+**1. Make it easier to get running.** This is the biggest thing between the
+project and anyone using it. Today setup wants `cmake`, `ninja`, `clang` and
+`python3` on your machine and takes several minutes before you see the game.
+
+The compile itself cannot go away: the module is your disc's own executable
+translated to native code, so it is game data and cannot be distributed — that
+constraint is the whole design, not an oversight. What *can* go is everything
+around it:
+
+- **Bundle the toolchain in the package**, so "install these four things first"
+  stops being step one. This is probably the single biggest reduction in people
+  who never get it running.
+- **Say what the first run is doing.** It currently goes quiet for several
+  minutes, which is indistinguishable from being hung.
+- **A Deck path that does not need a desktop.** Getting a module there still
+  means owning another machine or installing a toolchain on the handheld.
+
+**2. Mods, further than they go now.** Texture packs and texture mods work, and
+character skins install from the menu when their data is exactly the size of the
+entry they replace. Two gaps are known and neither is hidden by the UI:
+
+- A skin whose data is a *different* size needs the game's archive rebuilt —
+  every later entry shifts and the parent index has to be rewritten. Those are
+  still a job for [olkviewer](https://gamebanana.com/tools/21443).
+- Removing one skin means restoring all the game data, because the original
+  bytes are not kept anywhere. Per-mod uninstall would need them saved first.
+
+Beyond closing those:
+
+- **A mod browser in the menu** — browse and install without leaving the game.
+  The download half is already proven; it is how the mods used to test this
+  feature were fetched in the first place.
+- **A texture-dump helper in the Video tab.** The runtime can already dump the
+  game's textures; exposing it would let people *make* packs rather than only
+  install them, which is what a mod scene actually needs.
+
+**3. Whether any performance is left.** The stage-by-stage figures behind this
+page's numbers predate the Steam Deck training its own PGO profile, which was
+worth 14%. If the slow stages now hold full speed, the performance work is
+finished and several remaining ideas die with it — which is worth knowing either
+way.
+
+**4. A Windows build — coming.** No date yet. The scaffolding from the earlier
+Windows work is still in the tree, so this is a revival rather than a fresh
+start — but it is unbuilt and untested today, and nothing currently on the
+Releases page will run there.
+
+**5. Staying current with upstream.** The recompiler and the Dolphin-derived
+runtime both have upstreams that keep moving. Most of the delta is work this
+fork has measured and rejected, but not all of it.
+
+---
+
 ## Known issues
 
 - **The Deck package is SteamOS-only.** Its runtime is built against glibc 2.36 in
   a Debian 12 container, which clears SteamOS and essentially every current
   distro. A build made natively on SteamOS instead has a 2.38 floor and will not
   run on older SteamOS releases — so the container build stays the shipped one.
-- **Windows is retired.** There is no Windows CI job and no Windows package. The
-  workflow, packaging script, installer and launcher scaffolding are kept, unbuilt
-  and unmaintained, under `attic/windows/`. Linux and the Steam Deck are the
-  supported targets.
+- **There is no Windows build yet.** Linux and the Steam Deck are the supported
+  targets today: there is no Windows CI job and no Windows package, so nothing on
+  the Releases page will run there. A Windows version is coming — the workflow,
+  packaging script, installer and launcher scaffolding all still exist under
+  `attic/windows/`, so it is a revival rather than a fresh start, but it is
+  currently unbuilt and untested and has no date.
 - The `-march=native` build is machine-specific by design; setup compiles on your
   own machine. It matters in exactly one place: the Deck package ships no module
   and sends you here to build one, and a module built on a Zen 4/5 or recent
@@ -247,7 +348,7 @@ the sources shipped beside it.
 | `.github/deck-notes/` | the toolchain notes kept on the test Deck's desktop |
 | `docs/measuring.md` | how performance is measured, and the checks that keep it honest |
 | `docs/profile-guided-optimisation.md` | PGO: what it is worth, and how it silently does nothing |
-| `work/mg_userdir/GameSettings/GRSEAF.ini` | the verified cheat codes |
+| `work/mg_userdir/GameSettings/` | the cheat lists this project authored (US, JP) |
 
 Everything is vendored as plain files — clone and build, no submodule init needed.
 

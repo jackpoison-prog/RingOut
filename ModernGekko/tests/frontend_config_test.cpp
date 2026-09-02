@@ -6,6 +6,7 @@
 #include <iterator>
 #include <span>
 #include <string>
+#include <vector>
 
 int main() {
   namespace fs = std::filesystem;
@@ -86,7 +87,8 @@ int main() {
     output << custom;
   }
   if (!moderngekko::frontend::EnsureControllerConfig(
-          directory, netplay_config.controllers, &error))
+          directory, netplay_config.controllers, &error,
+          moderngekko::frontend::LocalMultiplayer::Disabled))
     return 11;
   std::ifstream custom_input(directory / "Config" / "WiimoteNew.ini");
   const std::string preserved{std::istreambuf_iterator<char>(custom_input),
@@ -149,6 +151,172 @@ int main() {
     if (!detected_config.contains("SDL/") ||
         !fs::is_regular_file(detected_directory / "Config" / "WiimoteNew.ini"))
       return 18;
+
+    // Dolphin allocates device ids per (source, NAME), not per source: two pads
+    // of DIFFERENT models are both id 0. Numbering them sequentially produced
+    // "SDL/1/<name>" for a device Dolphin calls "SDL/0/<name>", which resolves
+    // to nothing -- every binding reads unpressed and nothing reports an error.
+    // Only a machine with two differently-named pads can catch it.
+    const std::vector<std::string> pads =
+        moderngekko::frontend::DetectSdlGamepads();
+    for (std::size_t i = 0; i < pads.size(); ++i) {
+      const std::size_t slash = pads[i].find('/', 4);
+      if (slash == std::string::npos)
+        return 19;
+      const std::string name = pads[i].substr(slash);
+      std::size_t expected = 0;
+      for (std::size_t j = 0; j < i; ++j) {
+        if (pads[j].ends_with(name))
+          ++expected;
+      }
+      if (pads[i] != "SDL/" + std::to_string(expected) + name)
+        return 20;
+    }
+
+    // A second physical pad has to arrive PLAYABLE. Port 2 is attached by
+    // default now, and Dolphin's own defaults reach port 1 only, so without a
+    // written [GCPad2] the game un-greys VS Battle for a player who cannot
+    // move. The calibration line is the part no amount of hand-binding can
+    // recover: the CONTROLS tab lists controls, and calibration is not one.
+    if (pads.size() >= 2) {
+      if (!detected_config.contains("[GCPad2]\n") ||
+          !detected_config.contains("Device = " + pads[1] + "\n"))
+        return 21;
+      const std::size_t port2 = detected_config.find("[GCPad2]");
+      const std::string second = detected_config.substr(port2);
+      if (!second.contains("Main Stick/Calibration = ") ||
+          !second.contains("C-Stick/Calibration = ") ||
+          !second.contains("Triggers/L-Analog = ") ||
+          !second.contains("Buttons/A = `Button S`\n"))
+        return 22;
+      // Both ports must get the SAME map: a player whose A button is a
+      // different physical button from the other player's is a defect a test
+      // can catch and a play session cannot.
+      const std::size_t port1 = detected_config.find("[GCPad1]");
+      const std::string first = detected_config.substr(port1, port2 - port1);
+      // Everything after each section's Device line, so the header and the pad
+      // name -- the only two things that are meant to differ -- drop out.
+      const auto bindings = [](const std::string &section) {
+        const std::size_t device = section.find("Device = ");
+        return section.substr(section.find('\n', device) + 1);
+      };
+      if (bindings(first) != bindings(second))
+        return 23;
+    } else if (detected_config.contains("[GCPad2]")) {
+      return 24;  // one pad must not claim port 2
+    }
+
+    // The upgrade path. An existing profile is never rewritten, but one written
+    // before port 2 was attached has no [GCPad2] at all -- every install that
+    // predates it, which is the one the bug was reported from. The section is
+    // appended; nothing already in the file is touched; and a second run must
+    // not append it twice.
+    if (pads.size() >= 2) {
+      const fs::path upgrade = directory / "upgrade";
+      fs::create_directories(upgrade / "Config");
+      const std::string port1_only =
+          detected_config.substr(0, detected_config.find("[GCPad2]"));
+      {
+        std::ofstream output(upgrade / "Config" / "GCPadNew.ini",
+                             std::ios::trunc);
+        output << port1_only;
+      }
+      for (int pass = 0; pass < 2; ++pass) {
+        if (!moderngekko::frontend::EnsureControllerConfig(
+                upgrade, std::span<const std::string>{}, &error))
+          return 25;
+        std::ifstream upgraded_input(upgrade / "Config" / "GCPadNew.ini");
+        const std::string upgraded{
+            std::istreambuf_iterator<char>(upgraded_input),
+            std::istreambuf_iterator<char>()};
+        if (!upgraded.starts_with(port1_only))
+          return 26;  // the player's own port 1 was altered
+        const std::size_t first = upgraded.find("[GCPad2]");
+        if (first == std::string::npos ||
+            upgraded.find("[GCPad2]", first + 1) != std::string::npos)
+          return 27;  // absent, or appended twice
+        if (!upgraded.substr(first).contains("Main Stick/Calibration = "))
+          return 28;
+      }
+
+      // The launch path passes the controller saved in config.ini, so the list
+      // is non-empty on every install that has been through the frontend once.
+      // Port 2 must still be mapped there: the old guard read a non-empty list
+      // as "netplay" and silently disabled local two-player on exactly those
+      // installs, which is how a Deck with two pads attached ended up with
+      // Dolphin's own five-button stub for player 2. Only the caller can say
+      // which it is, so netplay says so explicitly and everything else does not.
+      const std::vector<std::string> saved = {pads[0]};
+      const fs::path named = directory / "named-controller";
+      fs::create_directories(named / "Config");
+      {
+        std::ofstream output(named / "Config" / "GCPadNew.ini", std::ios::trunc);
+        output << port1_only;
+      }
+      if (!moderngekko::frontend::EnsureControllerConfig(named, saved, &error))
+        return 29;
+      std::ifstream named_input(named / "Config" / "GCPadNew.ini");
+      const std::string named_config{std::istreambuf_iterator<char>(named_input),
+                                     std::istreambuf_iterator<char>()};
+      if (!named_config.contains("[GCPad2]\n") ||
+          !named_config.contains("Device = " + pads[1] + "\n") ||
+          !named_config.substr(named_config.find("[GCPad2]"))
+               .contains("Main Stick/Calibration = "))
+        return 30;
+
+      // Port 2 must never be handed the device port 1 already holds. The
+      // detected order is SDL's arrival order, not the port order: taking
+      // detected[1] worked on a desktop where port 1 happened to be
+      // detected[0], and on the Deck in Game Mode it gave both ports the same
+      // pad -- two characters on one controller, which is unplayable for both
+      // players rather than for one. Port 1 here names the pad SDL lists
+      // SECOND, which is the ordering that broke it.
+      const fs::path swapped = directory / "swapped-order";
+      fs::create_directories(swapped / "Config");
+      {
+        std::string port1_other = port1_only;
+        const std::size_t device = port1_other.find("Device = " + pads[0]);
+        if (device == std::string::npos)
+          return 33;
+        port1_other.replace(device, std::string("Device = " + pads[0]).size(),
+                            "Device = " + pads[1]);
+        std::ofstream output(swapped / "Config" / "GCPadNew.ini",
+                             std::ios::trunc);
+        output << port1_other;
+      }
+      if (!moderngekko::frontend::EnsureControllerConfig(
+              swapped, std::span<const std::string>{}, &error))
+        return 34;
+      std::ifstream swapped_input(swapped / "Config" / "GCPadNew.ini");
+      const std::string swapped_config{
+          std::istreambuf_iterator<char>(swapped_input),
+          std::istreambuf_iterator<char>()};
+      const std::size_t swapped_port2 = swapped_config.find("[GCPad2]");
+      if (swapped_port2 == std::string::npos ||
+          !swapped_config.substr(swapped_port2)
+               .contains("Device = " + pads[0] + "\n"))
+        return 35;
+
+      // ...and netplay, whose list looks identical, must NOT get port 2: there
+      // the entries are a per-machine assignment, not two pads on one desk.
+      const fs::path netplay_dir = directory / "netplay-controllers";
+      fs::create_directories(netplay_dir / "Config");
+      {
+        std::ofstream output(netplay_dir / "Config" / "GCPadNew.ini",
+                             std::ios::trunc);
+        output << port1_only;
+      }
+      if (!moderngekko::frontend::EnsureControllerConfig(
+              netplay_dir, saved, &error,
+              moderngekko::frontend::LocalMultiplayer::Disabled))
+        return 31;
+      std::ifstream netplay_input(netplay_dir / "Config" / "GCPadNew.ini");
+      const std::string netplay_pads{
+          std::istreambuf_iterator<char>(netplay_input),
+          std::istreambuf_iterator<char>()};
+      if (netplay_pads.contains("[GCPad2]"))
+        return 32;
+    }
   }
 
   fs::remove_all(directory);

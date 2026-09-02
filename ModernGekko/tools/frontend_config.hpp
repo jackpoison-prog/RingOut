@@ -55,7 +55,17 @@ bool WriteKeyboardGCPadConfig(const std::filesystem::path &user_directory,
 // Dolphin device name ("SDL/0/<pad name>"); DetectSdlGamepads produces them.
 bool WriteGamepadGCPadConfig(const std::filesystem::path &user_directory,
                              std::string_view device, std::string *message);
-// Connected SDL gamepads, as Dolphin device names, in Dolphin's own order.
+// The same, one port per device: devices[0] drives port 1, devices[1] port 2.
+// Port 2 needs its own section here because Dolphin gives default bindings to
+// port 1 only, and the CONTROLS tab cannot reach a stick's calibration at all.
+bool WriteGamepadGCPadConfig(const std::filesystem::path &user_directory,
+                             std::span<const std::string> devices,
+                             std::string *message);
+// Connected SDL gamepads, as Dolphin device names, in Dolphin's own order --
+// including its id numbering, which runs per (source, NAME) and not per source,
+// so two pads of different models are BOTH "SDL/0/...". Getting that wrong
+// yields a device that does not exist, and bindings written against it read as
+// unpressed forever without anything reporting an error.
 // Empty when there is no pad -- which is the signal to fall back to a keyboard
 // profile. Enumerated rather than hardcoded: the Steam Deck's pad reaches us
 // through Steam Input as a virtual X-Box 360 controller whose SDL name is NOT
@@ -67,9 +77,18 @@ bool GenerateControllerConfig(const std::filesystem::path &user_directory,
 bool GenerateControllerConfig(const std::filesystem::path &user_directory,
                               std::string_view controller,
                               std::string *message);
+// Whether a second PRESENT gamepad may be mapped to port 2. Netplay passes
+// Disabled: there the controller list is a per-machine netplay assignment, and
+// giving the local player a second local pad would be wrong. Everything else
+// wants Enabled -- note the ordinary launch path also passes a NON-EMPTY list,
+// the controller saved in config.ini, so "the caller named a device" is NOT a
+// usable proxy for "this is netplay".
+enum class LocalMultiplayer { Enabled, Disabled };
 bool EnsureControllerConfig(const std::filesystem::path &user_directory,
                             std::span<const std::string> controllers,
-                            std::string *message);
+                            std::string *message,
+                            LocalMultiplayer local = LocalMultiplayer::Enabled);
 bool EnsureControllerConfig(const std::filesystem::path &user_directory,
-                            std::string_view controller, std::string *message);
+                            std::string_view controller, std::string *message,
+                            LocalMultiplayer local = LocalMultiplayer::Enabled);
 } // namespace moderngekko::frontend
