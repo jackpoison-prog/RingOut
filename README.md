@@ -83,6 +83,14 @@ straight away. You can also pass the image directly:
 - `cmake`, `ninja`, `python3`, and `clang` (or `gcc`)
   - Arch: `sudo pacman -S cmake ninja clang python`
   - Debian/Ubuntu: `sudo apt install cmake ninja-build clang python3`
+  - Fedora: `sudo dnf install cmake ninja-build clang python3`
+  - Bazzite, Silverblue and other image-based Fedora systems:
+    `sudo rpm-ostree install cmake ninja-build clang python3`, then
+    `sudo systemctl reboot` — layered packages only exist after a reboot
+
+  `setup.sh` names the right command for whichever of these you are on, so if
+  something is missing it tells you what to run rather than leaving you to work
+  out which example applies.
 - A working Vulkan driver
 - ~1.5 GB free for the extracted disc and build output
 

@@ -74,10 +74,44 @@ missing=""
 for tool in cmake ninja python3; do
     command -v "$tool" >/dev/null || missing="$missing $tool"
 done
+# Name the command for THIS host rather than making the reader work out which
+# of two examples applies. Reported from Bazzite (RingOut#6), where the answer
+# is neither: it is Fedora-based AND image-based, so packages go in with
+# rpm-ostree and need a reboot before they exist -- a detail that costs a
+# confused half hour when the message only offers pacman and apt.
+toolchain_hint() {
+    id=""; like=""
+    if [ -r /etc/os-release ]; then
+        id="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID:-}")"
+        like="$(. /etc/os-release 2>/dev/null && printf '%s' "${ID_LIKE:-}")"
+    fi
+    case " $id $like " in
+        *" fedora "*|*" rhel "*)
+            if command -v rpm-ostree >/dev/null 2>&1; then
+                echo "  sudo rpm-ostree install cmake ninja-build clang python3"
+                echo "  sudo systemctl reboot     # rpm-ostree layers apply on boot"
+            else
+                echo "  sudo dnf install cmake ninja-build clang python3"
+            fi
+            ;;
+        *" debian "*|*" ubuntu "*)
+            echo "  sudo apt install cmake ninja-build clang python3" ;;
+        *" arch "*)
+            echo "  sudo pacman -S cmake ninja clang python" ;;
+        *)
+            echo "  Arch:          sudo pacman -S cmake ninja clang python"
+            echo "  Debian/Ubuntu: sudo apt install cmake ninja-build clang python3"
+            echo "  Fedora:        sudo dnf install cmake ninja-build clang python3"
+            echo "  Fedora atomic: sudo rpm-ostree install cmake ninja-build clang python3"
+            echo "                 sudo systemctl reboot" ;;
+    esac
+}
+
 if [ -n "$missing" ]; then
     echo "Missing required build tools:$missing"
-    echo "Install them and re-run. On Arch:  sudo pacman -S cmake ninja clang python"
-    echo "On Debian/Ubuntu:  sudo apt install cmake ninja-build clang python3"
+    echo
+    echo "Install them and re-run:"
+    toolchain_hint
     exit 1
 fi
 
