@@ -147,9 +147,13 @@ packaging now fails if the two disagree.)
 - **Cheat codes for all three regions** in `GameSettings/`, none enabled until you
   say so. The US and Japanese lists were checked code by code for this project;
   the PAL one is the list Dolphin already shipped and nobody could see
-- **Netplay** — rollback, lobby with live ping and per-player game status. A peer
-  holding a different disc, a differently built module or modified game data is
-  refused at connect and told which, rather than timing out with no explanation
+- **Netplay** — a direct connection (LAN, VPN or a forwarded port) with a lobby,
+  live ping and per-player game status. It is **delay-based, not rollback**: both
+  peers run the same inputs on the same frame, which is the model the determinism
+  work validated. The host sets the input buffer — 5 frames by default, about
+  83 ms at 60 fps, adjustable from 1 to 20 in the lobby. A peer holding a
+  different disc, a differently built module or modified game data is refused at
+  connect and told which, rather than timing out with no explanation
 - **Its own icon** — the disc banner and the memory-card icon are extracted from
   your disc and saves on your machine, and a desktop entry is written for you.
   None of that artwork ships; it is the publisher's.
