@@ -2566,7 +2566,14 @@ void Draw()
                        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize |
                        ImGuiWindowFlags_NoFocusOnAppearing))
   {
-    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f), "RING OUT  -  Ver 1.0");
+    // Version from the build, not from a literal: this line said "Ver 1.0" in
+    // every release up to and including 1.5, on the most-looked-at screen in
+    // the program.
+#ifndef MODERNGEKKO_PROJECT_VERSION
+#define MODERNGEKKO_PROJECT_VERSION "Ver 1.0"
+#endif
+    ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.4f, 1.0f),
+                       "RING OUT  -  " MODERNGEKKO_PROJECT_VERSION);
     ImGui::Separator();
 
     // Tab bar. Selected row 0 means the tab strip itself has focus, so mark it

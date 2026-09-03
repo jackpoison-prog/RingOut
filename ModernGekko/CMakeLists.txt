@@ -8,6 +8,25 @@ endif()
 include(CTest)
 include(CheckIncludeFileCXX)
 
+# The version the player sees, from ONE place. Both the window title and the
+# in-game menu header used to carry their own literal, and both still said
+# "Ver 1.0" at release 1.5 -- the runtime's #ifndef was written for a build-time
+# define that was never added, and the menu had a hard-coded string. The file is
+# outside this tree because the packaging scripts default from the same one, so
+# a release cannot be half-numbered. Standalone builds of ModernGekko have no
+# such file and keep the in-source fallbacks.
+set(MODERNGEKKO_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+if(EXISTS "${MODERNGEKKO_VERSION_FILE}")
+    file(READ "${MODERNGEKKO_VERSION_FILE}" MODERNGEKKO_VERSION_RAW)
+    string(STRIP "${MODERNGEKKO_VERSION_RAW}" MODERNGEKKO_VERSION_RAW)
+    if(MODERNGEKKO_VERSION_RAW MATCHES "^[0-9]+\\.[0-9]+(\\.[0-9]+)?$")
+        add_compile_definitions(MODERNGEKKO_PROJECT_VERSION="Ver ${MODERNGEKKO_VERSION_RAW}")
+        message(STATUS "moderngekko: version Ver ${MODERNGEKKO_VERSION_RAW} (from ${MODERNGEKKO_VERSION_FILE})")
+    else()
+        message(WARNING "moderngekko: ignoring unparseable VERSION '${MODERNGEKKO_VERSION_RAW}'")
+    endif()
+endif()
+
 # Keep the builder's absolute paths out of shipped binaries. __FILE__ literals
 # from asserts/logging live in .rodata, so `strip` does NOT remove them -- a
 # release build otherwise leaks the full home directory of whoever built it

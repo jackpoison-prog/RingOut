@@ -27,6 +27,20 @@
 #                 on every peer, so this is the test of it: set 3.0 here and
 #                 the session should still come out at 1.0.
 #   TIMEOUT=s     lobby timeout per peer (default 90)
+#   PKG=dir       package the peers run from (default dist/RingOut-1.0-deck)
+#   RUNTIME=path  emulator to run (default ./bin/moderngekko-run inside PKG)
+#   GAME=path     extracted disc root (default ./game inside PKG)
+#   MODULE=path   recompiled module (default ./bin/gGRSEAF_recomp.so in PKG)
+#   SAVE=dir      memory-card dir copied into each peer (default PKG/userdata/GC)
+#
+# The last four exist so this can be pointed at a disc that is not the US one.
+# Both peers cd into PKG first, so a RELATIVE value resolves there -- pass
+# absolute paths for anything outside it. GAME and MODULE must agree: the
+# runtime refuses a module whose disc ID is not the disc's. SAVE matters more
+# than it looks -- each disc reads its OWN card file (the JP disc wants
+# AF-GRSJ, PAL AF-GRSP, the Plus mod PS-GRSE), and a disc that finds no save of
+# its own parks on the memory-card dialog forever. Two peers agree perfectly on
+# a dialog, so that is a green hash over a session that played nothing.
 set -u
 P="${P:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 W="${1:-/tmp/netplay-local}"
@@ -37,7 +51,11 @@ W="${1:-/tmp/netplay-local}"
 case "$W" in /*) ;; *) W="$PWD/$W" ;; esac
 PLAY="${2:-60}"
 PORT="${3:-2626}"
-PKG="$P/dist/RingOut-1.0-deck"
+PKG="${PKG:-$P/dist/RingOut-1.0-deck}"
+RUNTIME="${RUNTIME:-./bin/moderngekko-run}"
+GAME="${GAME:-./game}"
+MODULE="${MODULE:-./bin/gGRSEAF_recomp.so}"
+SAVE="${SAVE:-$PKG/userdata/GC}"
 TIMEOUT="${TIMEOUT:-90}"
 
 pre="$(pgrep -x moderngekko-run 2>/dev/null | wc -l)"
@@ -52,7 +70,7 @@ setup_peer() {
   local name="$1"
   local d="$W/$name"
   mkdir -p "$d/user/Config" "$d/user/Pipes"
-  cp -r "$PKG/userdata/GC" "$d/user/" 2>/dev/null || true
+  cp -r "$SAVE" "$d/user/" 2>/dev/null || true
   mkfifo "$d/user/Pipes/ctrl"
   cat > "$d/user/Config/GCPadNew.ini" <<'EOF'
 [GCPad1]
@@ -105,8 +123,8 @@ launch() {
   fi
   local -a mode=(--headless)
   [ "${WINDOWED:-0}" = "1" ] && mode=()
-  ( cd "$PKG" && exec env "${hash_env[@]}" ./bin/moderngekko-run "${mode[@]}" \
-      --user-dir "$d/user" --game ./game --module ./bin/gGRSEAF_recomp.so \
+  ( cd "$PKG" && exec env "${hash_env[@]}" "$RUNTIME" "${mode[@]}" \
+      --user-dir "$d/user" --game "$GAME" --module "$MODULE" \
       --controller "Standard Controller" "$@" ) > "$d/log.txt" 2>&1 &
   echo $! > "$d/pid"
   echo "$name pid=$(cat "$d/pid")"

@@ -49,7 +49,12 @@ for entry in "${COMPONENTS[@]}"; do
   path="${entry#*:}"
   [ -d "$path/.git" ] || [ -f "$path/.git" ] || { echo "  FAIL: $path is not a git checkout" >&2; exit 1; }
 
-  short="$(git -C "$path" rev-parse --short HEAD)"
+  # Pinned length, NOT bare --short. Git auto-sizes the abbreviation from the
+  # object count, so a plain fetch into the vendored Dolphin clone silently
+  # moved this from 7 characters to 10 -- renaming the GPL archive, and leaving
+  # CREDITS.txt naming a file that no longer exists. The name a licence offer
+  # points at cannot depend on how many objects the builder happens to have.
+  short="$(git -C "$path" rev-parse --short=12 HEAD)"
   full="$(git -C "$path" rev-parse HEAD)"
   echo "  $name @ $full"
 

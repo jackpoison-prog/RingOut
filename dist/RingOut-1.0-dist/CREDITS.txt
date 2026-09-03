@@ -68,10 +68,10 @@ LICENCES
 The GPL requires that anyone receiving these binaries can get the matching
 source. It is in source/ :
 
-  ModernGekko-b79d991.tar.gz               ModernGekko at the built commit
-  ModernGekko-dolphin-1873066.tar.gz       the Dolphin tree it vendors
+  ModernGekko-b79d991ab780.tar.gz          ModernGekko at the built commit
+  ModernGekko-dolphin-1873066167f3.tar.gz  the Dolphin tree it vendors
   ModernGekko-dolphin-new-files.tar.gz     new files added by this project
-  DolRecomp-2595de5.tar.gz                 the recompiler
+  DolRecomp-2595de599288.tar.gz            the recompiler
   DolRecomp-new-files.tar.gz               its IR and LLVM backend, added here
   *-local-changes.patch                    every modification made here
 

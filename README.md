@@ -114,6 +114,16 @@ packaging now fails if the two disagree.)
 - **Any region** — US, Japanese and PAL discs all recompile. The OS idle loop is
   found in *your* disc rather than assumed, so a new region needs no new constant,
   and each ships its own cheat list and PGO profile
+- **Community "Plus" disc mods run too** — a modded disc (ID `GRSEPS`) recompiles
+  and plays with no special handling and no extra flags: its idle loop is detected
+  like any other disc, and it is given the US PGO profile because it hooks the US
+  executable in place rather than replacing it. Three of its code blocks rewrite
+  themselves at run time, fail the chunk hash and run interpreted, which is the
+  whole of its measured cost: 5-7% more CPU than the stock disc over the same
+  arcade route — but only **1.7 points of on-screen speed on a Steam Deck**,
+  because the display is not what the extra work competes with. It keeps a
+  **separate save file** from the stock disc, so neither can see the other's
+  saved data
 - **Reads the disc formats the file picker offers** — `.iso`, `.gcm`, `.wbfs`,
   `.rvz`, `.gcz`, `.wia` and NKit variants
 - **HD texture pack support** — drop a pack in `userdata/Load/Textures/GRS/`

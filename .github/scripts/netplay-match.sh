@@ -23,7 +23,17 @@ P="${P:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 W="${1:-/tmp/netplay-match}"
 PLAY="${2:-60}"
 PORT="${3:-2640}"
-PKG="$P/dist/RingOut-1.0-deck"
+# PKG/RUNTIME/GAME/MODULE/SAVE exist so this can be pointed at a disc that is
+# not the US one -- the peers cd into PKG, so relative values resolve there and
+# anything outside it needs an absolute path. SAVE is not optional detail: each
+# disc reads its OWN card file (JP wants AF-GRSJ, PAL AF-GRSP, the Plus mod
+# PS-GRSE), and a disc that finds none parks on the memory-card dialog, where
+# two peers agree perfectly and prove nothing.
+PKG="${PKG:-$P/dist/RingOut-1.0-deck}"
+RUNTIME="${RUNTIME:-./bin/moderngekko-run}"
+GAME="${GAME:-./game}"
+MODULE="${MODULE:-./bin/gGRSEAF_recomp.so}"
+SAVE="${SAVE:-$PKG/userdata/GC}"
 
 pre="$(pgrep -x moderngekko-run 2>/dev/null | wc -l)"
 if [ "$pre" != "0" ]; then
@@ -38,7 +48,7 @@ setup_peer() {
   mkdir -p "$d/user/Config" "$d/user/Pipes"
   # Mandatory: without save data the game parks forever on the memory-card
   # dialog and nothing below happens.
-  cp -r "$PKG/userdata/GC" "$d/user/" 2>/dev/null || true
+  cp -r "$SAVE" "$d/user/" 2>/dev/null || true
   mkfifo "$d/user/Pipes/ctrl"
   cat > "$d/user/Config/GCPadNew.ini" <<'EOF'
 [GCPad1]
@@ -79,9 +89,14 @@ launch() {
   local d="$W/$name"
   local -a mode=(--headless)
   [ "${WINDOWED:-0}" = "1" ] && mode=()
+  # GX_STATS is the objective witness that the peers reached GAMEPLAY. Without
+  # it this script can only claim the two agreed, and its own header says that
+  # is not the same claim -- a pair stuck at character select is byte-identical
+  # too. Draw traffic separates the two by two orders of magnitude.
   ( cd "$PKG" && exec env RINGOUT_DETERMINISM_LOG="$d/hash.log" \
-      ./bin/moderngekko-run "${mode[@]}" --user-dir "$d/user" --game ./game \
-      --module ./bin/gGRSEAF_recomp.so --controller "Standard Controller" \
+      RINGOUT_GX_STATS=100 \
+      "$RUNTIME" "${mode[@]}" --user-dir "$d/user" --game "$GAME" \
+      --module "$MODULE" --controller "Standard Controller" \
       "$@" ) > "$d/log.txt" 2>&1 &
   echo $! > "$d/pid"
 }
@@ -170,7 +185,34 @@ if [ -s "$W/host/hash.log" ] && [ -s "$W/guest/hash.log" ]; then
   echo "guest-RAM hash over $n frames:"
   if diff -q "$W/h.trim" "$W/g.trim" >/dev/null; then
     echo "  IDENTICAL on every frame"
+    hash_ok=1
   else
     echo "  FIRST DIVERGENCE:"; diff "$W/h.trim" "$W/g.trim" | head -4
+    hash_ok=0
   fi
+fi
+
+# Did they actually PLAY? [gx] prints a cumulative mean every 100 displayed
+# frames, so differencing consecutive lines gives the traffic of that window.
+# Menus and character select sit near 200 draws; a match is tens of thousands.
+peak_draws() {
+  grep -a '^\[gx\]' "$1" | sed 's/[a-z_]*=//g' |
+    awk '{f=$2; d=$4; s=d*f; w=s-p; p=s; if (w>m) m=w} END{printf "%.0f", m+0}'
+}
+hd="$(peak_draws "$W/host/log.txt")"; gd="$(peak_draws "$W/guest/log.txt")"
+echo "peak draw calls per 100 displayed frames:  host=$hd  guest=$gd"
+played=0
+[ "${hd:-0}" -gt 5000 ] && [ "${gd:-0}" -gt 5000 ] && played=1
+
+if grep -qa "DESYNC" "$W"/*/log.txt 2>/dev/null || [ "${hash_ok:-0}" != "1" ]; then
+  echo "RESULT: DESYNCED"
+  exit 1
+elif [ "$played" != "1" ]; then
+  # The peers agreed, but on what? Sitting in a menu in perfect sync is the
+  # false pass this script was written to stop claiming.
+  echo "RESULT: IN SYNC BUT NEVER REACHED GAMEPLAY -- draw traffic stayed at"
+  echo "        menu levels, so the input route did not land. Not a pass."
+  exit 1
+else
+  echo "RESULT: both peers played a match, hashes identical on every frame"
 fi

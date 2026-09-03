@@ -33,7 +33,10 @@ OUT="${OUT:-$REPO/dist}"
 # working package directory, which keeps its historical RingOut-1.0-* name:
 # that is 1.3 GB of developer state referenced by .gitignore and a dozen
 # scripts, and renaming it would churn all of them for nothing a player sees.
-VERSION="${VERSION:-1.1}"
+# One source of truth, so a release cannot be half-numbered. The literal
+# default this replaced was 1.1, four releases stale, and it was only ever
+# right because every real release passed VERSION= explicitly.
+VERSION="${VERSION:-$(cat "$REPO/VERSION" 2>/dev/null || echo 1.1)}"
 PKG="RingOut-1.0-deck"
 SRC="$REPO/dist/$PKG"
 
@@ -144,6 +147,30 @@ echo "    $(ls "$STAGE/lib" | wc -l) libraries"
 # --- binaries and scaffolding --------------------------------------------
 echo "==> scaffolding"
 install -m 755 "$RUNTIME"        "$STAGE/bin/moderngekko-run"
+# The runtime carries its own version, and until 1.5 it carried the WRONG one:
+# nothing defined MODERNGEKKO_PROJECT_VERSION, so the window title and the
+# in-game menu both said "Ver 1.0" while the README said 1.5. A stamped README
+# next to a stale binary is worse than no version at all, because it looks
+# checked. The binary is built separately from this script, so assert rather
+# than assume.
+# Anchored on the menu banner, NOT on a bare "Ver x.y": the compiler inlines
+# the short version literal into .text as immediate operands, and the byte after
+# it is often 0x49, so `strings` reports a truncated "Ver 1.5.I" from the CODE
+# before it ever reaches the real literal in .rodata. Matching the first
+# "Ver ..." therefore read 1.5 out of a 1.5.1 binary and failed a correct
+# package. The banner is too long to be inlined, so it is always the real thing.
+embedded="$(strings "$STAGE/bin/moderngekko-run" 2>/dev/null |
+            grep -m1 -oE 'RING OUT[[:space:]]+-[[:space:]]+Ver [0-9]+\.[0-9]+(\.[0-9]+)?' |
+            grep -oE 'Ver [0-9]+\.[0-9]+(\.[0-9]+)?' || true)"
+if [ -z "$embedded" ]; then
+  echo "  WARNING: no version string found in the runtime; cannot check it" >&2
+elif [ "$embedded" != "Ver $VERSION" ]; then
+  echo "  FAIL: the runtime says '$embedded' but this package is $VERSION." >&2
+  echo "        Rebuild it after setting VERSION at the repo root -- CMake" >&2
+  echo "        reads that file and defines the version from it." >&2
+  exit 1
+fi
+
 install -m 755 "$SRC/RingOut"    "$STAGE/RingOut"
 # Same extractor the desktop package ships. The Deck package has no setup.sh --
 # it is prebuilt -- so the launcher runs this the first time a game is present.
@@ -178,6 +205,10 @@ install -m 644 "$SRC/README.txt" "$STAGE/README.txt"
 # this was a verbatim copy and nobody edits a header twice.
 sed -i "1s/^Ring Out - Ver .*/Ring Out - Ver $VERSION/" "$STAGE/README.txt"
 install -m 644 "$SRC/CREDITS.txt" "$STAGE/CREDITS.txt"
+# CREDITS.txt carries the same header and was NOT being stamped, so every
+# release since 1.0 shipped a credits file that said Ver 1.0 next to a README
+# that said the truth. Stamped from the same variable as the README.
+sed -i "1s/^Ring Out - Ver .*/Ring Out - Ver $VERSION/" "$STAGE/CREDITS.txt"
 # Building on the Deck itself. The desktop README points players here by name,
 # so it has to actually ship -- it lived only in work/ (gitignored) for a while
 # and the pointer was a promise to a file nobody would ever receive.

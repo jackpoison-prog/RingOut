@@ -1073,7 +1073,23 @@ int RunNetplayLobby(RuntimeConfig runtime_config, ConfigResult frontend_config,
       result = static_cast<int>(NetplayExitCode::Failed);
     } else if (!WaitFor(ui, *client, std::chrono::seconds(30),
                         [&] { return client->DoAllPlayersHaveGame(); })) {
+      // Name WHO failed and HOW. The comparison already distinguishes a
+      // different region from a different dump, and the lobby table shows it,
+      // but this line used to throw all of that away -- leaving a player who
+      // has exactly the right disc reading "not every player has this game".
+      // That is a real reading of it: the sync identifier is derived from the
+      // game DIRECTORY, so one stray file in game/files/ (a leftover .bak, an
+      // unpacked mod) is enough to make two identical installs disagree, and
+      // "different dump" is the clue that points there.
       Log("not every player has this game; refusing to start");
+      for (const NetPlay::Player *player : client->GetPlayers()) {
+        if (player->game_status == NetPlay::SyncIdentifierComparison::SameGame)
+          continue;
+        Log("  " + player->name + ": " +
+            GameStatusText(player->game_status));
+      }
+      Log("  same disc on both sides? then check for extra files in "
+          "game/files/ -- the check reads the whole folder");
       result = static_cast<int>(NetplayExitCode::CompatibilityMismatch);
     } else {
       AssignPads(*server, client->GetPlayers());

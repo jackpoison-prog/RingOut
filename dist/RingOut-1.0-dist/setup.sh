@@ -218,6 +218,13 @@ PRE_IS_CLANG=0
 PRE_PROF=""
 [ -n "$PRE_ID" ] && [ -f "$HERE/module-src/profiles/$PRE_ID.profdata" ] &&
     PRE_PROF="$HERE/module-src/profiles/$PRE_ID.profdata"
+# The build below gives GRSEPS the US profile -- it hooks the US executable in
+# place, so its chunks ARE the US disc's chunks. Say the same thing here: this
+# check used to report "none ships for GRSEPS" and send a Plus owner off to
+# retrain a profile they were about to be given anyway.
+[ -z "$PRE_PROF" ] && [ "$PRE_ID" = "GRSEPS" ] &&
+    [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ] &&
+    PRE_PROF="$HERE/module-src/profiles/GRSEAF.profdata"
 if [ "$PRE_IS_CLANG" = 1 ] && [ -n "$PRE_PROF" ]; then
     if echo 'int main(void){return 0;}' |
        "$CC" -x c - -fprofile-use="$PRE_PROF" -o /dev/null >/dev/null 2>&1; then
