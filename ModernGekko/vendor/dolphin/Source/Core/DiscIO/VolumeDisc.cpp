@@ -9,6 +9,7 @@
 
 #include "Common/CommonTypes.h"
 #include "Common/Crypto/SHA1.h"
+#include "DiscIO/Blob.h"
 #include "DiscIO/DiscUtils.h"
 #include "DiscIO/Enums.h"
 #include "DiscIO/Filesystem.h"
@@ -189,9 +190,26 @@ void VolumeDisc::AddGamePartitionToSyncHash(Common::SHA1::Context* context) cons
 {
   const Partition partition = GetGamePartition();
 
-  // All headers at the beginning of the partition, plus the apploader
-  ReadAndAddToSyncHash(context, 0, 0x2440 + GetApploaderSize(*this, partition).value_or(0),
-                       partition);
+  // All headers at the beginning of the partition, plus the apploader.
+  //
+  // For a directory-backed volume, [0x420,0x440) is skipped: that is the disc
+  // LAYOUT table -- boot DOL offset, FST offset, FST size, user area position
+  // and length -- and for an extracted folder every one of those is computed
+  // from the current directory contents rather than read from a disc. Adding an
+  // unrelated file shifts them, which changed the hash even after the FST
+  // itself was excluded below. The identifying part of the header (game code,
+  // maker code, disc number, version, at 0x000) is still hashed, as is bi2.bin
+  // and the apploader.
+  const u64 header_and_apploader = 0x2440 + GetApploaderSize(*this, partition).value_or(0);
+  if (GetBlobType() == BlobType::DIRECTORY)
+  {
+    ReadAndAddToSyncHash(context, 0, 0x420, partition);
+    ReadAndAddToSyncHash(context, 0x440, header_and_apploader - 0x440, partition);
+  }
+  else
+  {
+    ReadAndAddToSyncHash(context, 0, header_and_apploader, partition);
+  }
 
   // Boot DOL (may be missing if this is a Datel disc)
   const std::optional<u64> dol_offset = GetBootDOLOffset(*this, partition);
@@ -201,10 +219,33 @@ void VolumeDisc::AddGamePartitionToSyncHash(Common::SHA1::Context* context) cons
                          GetBootDOLSize(*this, partition, *dol_offset).value_or(0), partition);
   }
 
-  // File system
-  const std::optional<u64> fst_offset = GetFSTOffset(*this, partition);
-  if (fst_offset)
-    ReadAndAddToSyncHash(context, *fst_offset, GetFSTSize(*this, partition).value_or(0), partition);
+  // File system.
+  //
+  // NOT for a directory-backed volume, and this is a deliberate fork change.
+  // An extracted disc has no FST on disk: Dolphin SYNTHESISES one from whatever
+  // the folder currently contains, so the hash becomes a function of the
+  // directory listing rather than of the game. One unrelated file in
+  // game/files/ -- a leftover .bak, an unpacked mod, an editor's stray save --
+  // then makes two byte-identical installs disagree, and netplay refuses with
+  // "not every player has this game" while both players hold exactly the same
+  // disc. Measured: a single 30-byte file was enough, in both directions.
+  //
+  // Nothing real is given up. The game ID, revision and disc number are their
+  // own fields of the sync identifier; the headers, apploader, boot DOL and
+  // banner above are still hashed BY CONTENT. And this fork sends its own
+  // identity at connect -- disc ID, the DOL's SHA-256, the hash of the game's
+  // own archive and the module ABI -- which the host compares before the
+  // session starts, so a genuinely different or modified copy is still refused
+  // there (ConnectionError::DifferentGame / ::CompatibilityMismatch). That is
+  // the check that actually protects a skin-modded copy from joining, and it
+  // reads the files rather than their names.
+  if (GetBlobType() != BlobType::DIRECTORY)
+  {
+    const std::optional<u64> fst_offset = GetFSTOffset(*this, partition);
+    if (fst_offset)
+      ReadAndAddToSyncHash(context, *fst_offset, GetFSTSize(*this, partition).value_or(0),
+                           partition);
+  }
 
   // opening.bnr (name and banner)
   const FileSystem* file_system = GetFileSystem(partition);

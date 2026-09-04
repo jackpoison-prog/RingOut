@@ -280,8 +280,15 @@ struct State
 
   // Input detection is asynchronous: Start() then Update() until IsComplete(),
   // driven from PumpFrame so the overlay keeps redrawing while we wait.
+  //
+  // detecting_control is set the moment a bind is ARMED, which is before the
+  // detector exists -- see ArmDetection. It is the marker for "this row is
+  // waiting for a button", and detector != nullptr only means the wait has
+  // actually begun. Everything that asks "are we binding?" must test the
+  // control, not the detector.
   std::unique_ptr<ciface::Core::InputDetector> detector;
   ControllerEmu::Control* detecting_control = nullptr;
+  std::chrono::steady_clock::time_point detect_armed_at{};
 
   std::vector<ActionReplay::ARCode> ar_codes;
   std::vector<Gecko::GeckoCode> gecko_codes;
@@ -1309,16 +1316,23 @@ void BuildControlRowsData(std::vector<ControlRow>* rows)
   }
 }
 
-void StartDetection(State& state, ControllerEmu::Control* control)
+// ARMS a rebind. The detector is deliberately NOT started here -- StartArmed
+// does that once the pad is idle.
+//
+// InputDetector::Start samples every input's CURRENT value as `initial_state`
+// and then scores a press as `state - abs(initial_state)`, so an input that was
+// already down when it started can never clear the threshold. On a pad the row
+// is activated with A, which is still held at that instant, and A was therefore
+// unbindable -- press it and nothing happened, for the whole 3 seconds. Same
+// for whatever button a player activates the row with, so this hits the pad's
+// own confirm button every time.
+void ArmDetection(State& state, ControllerEmu::Control* control)
 {
-  auto* const pad = GetConfiguredPad();
-  if (pad == nullptr || control == nullptr)
+  if (control == nullptr)
     return;
 
-  const std::vector<std::string> devices = {pad->GetDefaultDevice().ToString()};
-  state.detector = std::make_unique<ciface::Core::InputDetector>();
-  state.detector->Start(g_controller_interface, devices);
   state.detecting_control = control;
+  state.detect_armed_at = std::chrono::steady_clock::now();
 }
 
 // Reads the game's Action Replay + Gecko codes from its ini (built-in defaults
@@ -1844,7 +1858,7 @@ void OnKey(Key key)
       return;
 
     // Ignore everything while waiting for a button press to bind.
-    if (s_state.detector != nullptr)
+    if (s_state.detecting_control != nullptr)
       return;
 
     const int row_count = 1 + RowCount(s_state);  // row 0 = tab selector
@@ -2035,7 +2049,7 @@ void OnKey(Key key)
             port2_enabled = !Port2Attached();
           }
           else if (control_index < static_cast<int>(s_state.control_rows.size()))
-            StartDetection(s_state, s_state.control_rows[control_index].control);
+            ArmDetection(s_state, s_state.control_rows[control_index].control);
         }
         else if (s_state.tab == Tab::Cheats)
         {
@@ -2341,7 +2355,7 @@ void OnEscape()
     // below must fall through to Toggle so Escape still opens the menu.
     if (s_state.open)
     {
-      if (s_state.detector != nullptr)
+      if (s_state.detecting_control != nullptr)
       {
         s_state.detector.reset();
         s_state.detecting_control = nullptr;
@@ -2445,7 +2459,7 @@ void Draw()
     tab = s_state.tab;
     selected = s_state.selected;
     state_slot = s_state.state_slot;
-    detecting = s_state.detector != nullptr;
+    detecting = s_state.detecting_control != nullptr;
     editing_address = s_state.netplay_addr_octet >= 0;
 
     switch (tab)
@@ -2729,6 +2743,65 @@ void UpdateDetection()
     config->SaveConfig();
 }
 
+// Whether the CONTROLS tab is waiting for a button to bind -- armed or already
+// detecting. Takes the state lock and releases it, so callers may still reach
+// OnKey/OnEscape afterwards.
+bool DetectionInProgress()
+{
+  std::lock_guard<std::mutex> guard(s_state.mutex);
+  return s_state.detecting_control != nullptr;
+}
+
+// Nothing on the pad being configured is currently pressed. Reads the DETECTION
+// device, not the menu's: configuring port 2 with port 1's pad in hand leaves
+// port 2's device idle, which is the right answer.
+bool DetectionDeviceIdle()
+{
+  auto* const pad = GetConfiguredPad();
+  if (pad == nullptr)
+    return true;
+  const auto device = g_controller_interface.FindDevice(pad->GetDefaultDevice());
+  if (device == nullptr)
+    return true;
+
+  for (auto* const input : device->Inputs())
+  {
+    if (input->IsDetectable() && input->GetState() > 0.5)
+      return false;
+  }
+  return true;
+}
+
+// Starts an armed detection once the button that armed it has been let go, so
+// that button is bindable like any other (see ArmDetection).
+//
+// The wait is bounded: a stuck or drifting input would otherwise leave the row
+// saying "Press a key or button..." for ever, with no way out but a keyboard.
+// After the deadline it starts anyway, which is exactly the old behaviour.
+void StartArmedDetection()
+{
+  constexpr auto kMaxWaitForRelease = std::chrono::milliseconds(2000);
+
+  std::lock_guard<std::mutex> guard(s_state.mutex);
+  if (s_state.detecting_control == nullptr || s_state.detector != nullptr)
+    return;
+
+  if (!DetectionDeviceIdle() &&
+      std::chrono::steady_clock::now() - s_state.detect_armed_at < kMaxWaitForRelease)
+    return;
+
+  auto* const pad = GetConfiguredPad();
+  if (pad == nullptr)
+  {
+    s_state.detecting_control = nullptr;
+    return;
+  }
+
+  const std::vector<std::string> devices = {pad->GetDefaultDevice().ToString()};
+  s_state.detector = std::make_unique<ciface::Core::InputDetector>();
+  s_state.detector->Start(g_controller_interface, devices);
+}
+
 // Debug aid: RECOMP_MENU_AUTOOPEN=<seconds> opens the menu by itself that long
 // after the first tick, so the overlay can be verified without a keypress
 // (synthetic input does not work on native Wayland).
@@ -2758,6 +2831,20 @@ void PollMenuGamepad()
   // Only while open, so this never races the CPU thread's own polling.
   if (IsOpen())
     g_controller_interface.UpdateInput();
+
+  // WHILE A REBIND IS CAPTURING, EVERY PRESS BELONGS TO THE DETECTOR.
+  //
+  // The CONTROLS tab binds the same buttons this function steers the menu with,
+  // so the press being captured was also being acted on: B ("Button E") reached
+  // OnEscape, which cancels a pending bind, and the row backed out instead of
+  // binding (RingOut#9). A and the D-pad looked inert only because OnKey
+  // already ignores keys while detecting -- the guard was there, one entry
+  // point short.
+  //
+  // Nothing here needs to offer a way out: the detector gives up on its own
+  // after 3 seconds with nothing pressed (InputDetector::Update's initial_wait),
+  // so a bind started by accident on a machine with no keyboard un-arms itself.
+  const bool detecting = DetectionInProgress();
 
   struct Binding
   {
@@ -2818,7 +2905,13 @@ void PollMenuGamepad()
     }
     was_down = down;
 
-    if (IsOpen())
+    if (detecting)
+    {
+      // Spend a press made while binding, so letting go of the button that was
+      // just captured cannot open or close the menu once detection ends.
+      consumed = down;
+    }
+    else if (IsOpen())
     {
       // Dismiss on the PRESS, not the release: waiting for release made closing
       // feel laggy, which is the wrong trade for the direction that costs
@@ -2840,10 +2933,10 @@ void PollMenuGamepad()
     }
   }
 
-  if (!IsOpen())
+  if (!IsOpen() || detecting)
   {
-    // Still sample the rest so a button held while opening is not seen as a
-    // fresh press on the first frame the menu is up.
+    // Still sample the rest so a button held while opening -- or held while it
+    // was being bound -- is not seen as a fresh press on the first frame after.
     for (std::size_t i = 0; i < std::size(kBindings); ++i)
       pressed(kBindings[i].input, &held[i]);
     pressed("Button E", &held[std::size(kBindings) + 1]);
@@ -2973,6 +3066,7 @@ void PumpFrame()
   if (!IsOpen())
     return;
 
+  StartArmedDetection();
   UpdateDetection();
 
   // With the core paused the CPU thread submits nothing, so the video thread

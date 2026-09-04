@@ -16,6 +16,14 @@ include(CheckIncludeFileCXX)
 # a release cannot be half-numbered. Standalone builds of ModernGekko have no
 # such file and keep the in-source fallbacks.
 set(MODERNGEKKO_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION")
+# file(READ) happens at CONFIGURE time, so editing VERSION alone changes
+# nothing: ninja has no reason to re-run cmake and rebuilds every object with
+# the PREVIOUS number still compiled in. Bumping 1.5.1 -> 1.5.2 did exactly
+# that, and the only thing that noticed was the packaging guard, long after.
+# Naming the file as a configure dependency is what makes "edit VERSION,
+# rebuild" true.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${MODERNGEKKO_VERSION_FILE}")
 if(EXISTS "${MODERNGEKKO_VERSION_FILE}")
     file(READ "${MODERNGEKKO_VERSION_FILE}" MODERNGEKKO_VERSION_RAW)
     string(STRIP "${MODERNGEKKO_VERSION_RAW}" MODERNGEKKO_VERSION_RAW)
