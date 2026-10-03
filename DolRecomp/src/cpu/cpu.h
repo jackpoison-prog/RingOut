@@ -15,6 +15,19 @@
 #define DOLRECOMP_CHUNK_FN
 #endif
 
+/* A twin chunk's fast copy hands any entry PC not on its hot list to the cold
+ * copy (backend/twin.c). DOLRECOMP_TWIN_MISS_LOG makes that hand-off count the
+ * PC, so `setup.sh --pgo` can see traffic the shipped hot list misses and add
+ * it -- a list recorded before a codegen change drifts silently (the chunk
+ * overhang sent 7-8% of entries to the cold copies). Nothing otherwise: the
+ * shipped module compiles exactly as before. */
+#if defined(DOLRECOMP_TWIN_MISS_LOG)
+void dolrecomp_twin_miss(u32 pc);
+#define DOLRECOMP_TWIN_MISS(pc) dolrecomp_twin_miss(pc)
+#else
+#define DOLRECOMP_TWIN_MISS(pc) ((void)0)
+#endif
+
 // New-ABI CPUState (spr[1024] + mem2, no external_pointer). Kept in sync with
 // the chassis runtime header (GXRuntime core/cpu.h) for the module ABI check.
 #define GXRUNTIME_CPU_ABI_VERSION 4u
@@ -697,6 +710,38 @@ DOLRECOMP_PSQ_AI bool dolrecomp_psq_load_inline_r(CPUState* cpu, u8* ram, u8 frD
             cpu->ps1[frD] = w ? 1.0 : dolrecomp_psq_single_value(dolrecomp_mem_read32_r(cpu, ram, ea + 4u));
         }
         return true;
+    }
+    /* QUANTISED TYPES (4-7: u8, u16, s8, s16) INLINE. These went to
+     * ppc_psq_load_full, an out-of-line call, every time -- 0.76% of module
+     * samples in a fight profile (psq_load_value + ppc_psq_load_full, US,
+     * frames 4800-16000, 2026-10-01). Same arithmetic as psq_load_value:
+     * (f64)(f32)((f64)v * 2^-scale), so bit-identical. Integer types have no
+     * alignment rule; only both lanes inside main RAM are taken here, anything
+     * else still goes the full path. */
+    {
+        const u32 gqr = cpu->gqr[gqr_index & 7u];
+        const u32 type = (gqr >> 16) & 7u;
+        if (__builtin_expect(type >= 4u && (cpu->hid2 & PPC_HID2_PSE) != 0u &&
+                             (indexed || (cpu->hid2 & PPC_HID2_LSQE) != 0u), 1)) {
+            const u32 size = (type & 1u) ? 2u : 1u; /* 4,6: one byte; 5,7: two */
+            const u32 off = ea - GC_RAM_BASE;
+            if (__builtin_expect(off <= GC_MAIN_RAM_SIZE - 2u * size, 1)) {
+                const u8* h = ram + off;
+                const s32 scale = ((s32)(((gqr >> 24) & 0x3Fu) << 26)) >> 26;
+                union { u64 u; f64 d; } m;
+                m.u = (u64)(u32)(1023 - scale) << 52; /* 2^-scale, exact */
+                f64 a, b = 0.0;
+                switch (type) {
+                case 4: a = (f64)h[0];                 if (!w) b = (f64)h[1];                 break;
+                case 5: a = (f64)read_be16(h);         if (!w) b = (f64)read_be16(h + 2);     break;
+                case 6: a = (f64)(s8)h[0];             if (!w) b = (f64)(s8)h[1];             break;
+                default: a = (f64)(s16)read_be16(h);   if (!w) b = (f64)(s16)read_be16(h + 2); break;
+                }
+                cpu->fpr[frD] = (f64)(f32)(a * m.d);
+                cpu->ps1[frD] = w ? 1.0 : (f64)(f32)(b * m.d);
+                return true;
+            }
+        }
     }
     return ppc_psq_load_full(cpu, frD, ea, w, gqr_index, indexed, cia);
 }

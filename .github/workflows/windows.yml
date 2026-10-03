@@ -10,6 +10,11 @@ on:
         description: 'Upload the release asset (default: build only)'
         type: boolean
         default: false
+      pgo:
+        description: 'Runtime PGO: auto (use the committed profile if present), none, or instrument (build the training exe)'
+        type: choice
+        options: [auto, none, instrument]
+        default: auto
 # DISPATCH ONLY, since 2026-09-08. There is no `push:` trigger any more, for
 # the same reason deck.yml lost its one on 2026-08-17 -- and this job is worse
 # on every axis that mattered there.
@@ -38,17 +43,100 @@ jobs:
       - name: Check out
         uses: actions/checkout@v7
 
+      - name: Choose PGO mode
+        # MSVC PGO rides on LTO (/GL + /LTCG, below). Three modes:
+        # Both profile flags need /LTCG spelled out on the link line (LNK1220):
+        # CMake's IPO sets it as a project property, which the linker does not
+        # count, so it is passed again here.
+        #   instrument  link with /GENPROFILE; the exe writes .pgc counts when
+        #               it exits. Published under its OWN asset name with the
+        #               .pgd and pgort140.dll it needs, never as the binaries.
+        #   auto        if ModernGekko/pgo/runtime-windows/profile.7z exists,
+        #               unpack it, merge its .pgc files into its .pgd (pgomgr)
+        #               and link with /USEPROFILE; otherwise plain LTO.
+        #   none        plain LTO.
+        # A .pgd is tied to the MSVC toolset that made it (LNK1266 on another),
+        # so the instrument run records the toolset in toolset.txt (packed into
+        # the archive with the profile) and a
+        # profiled build pins -T to it. A runner image without that toolset
+        # falls back to plain LTO with a warning instead of failing.
+        #
+        # TRAIN WINDOWED WITH D3D11, not headless: MSVC compiles every function
+        # the training never ran for SIZE, and GCC's -fprofile-partial-training
+        # has no MSVC equivalent. A headless (Null renderer) profile would make
+        # the renderer players actually use slower.
+        id: pgo
+        shell: pwsh
+        run: |
+          $mode = '${{ inputs.pgo }}'; if (-not $mode) { $mode = 'auto' }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $prof = 'ModernGekko/pgo/runtime-windows'
+          $link = ''; $toolset = ''
+          if ($mode -eq 'instrument') {
+            $link = '/LTCG /GENPROFILE'
+            $toolset = (Get-ChildItem "$vs\VC\Tools\MSVC" | Sort-Object Name | Select-Object -Last 1).Name
+          } elseif ($mode -eq 'auto' -and (Test-Path "$prof/profile.7z")) {
+            # One 7z (.pgd, the training .pgc files, toolset.txt): 112 MB raw,
+            # ~12 MB committed. 7-Zip, not tar: a tar -xJf here hung the job
+            # silently for 50 minutes (run 36649768296). Every stage says what
+            # it is doing, and pgomgr runs with no stdin and a time limit.
+            New-Item -ItemType Directory -Force pgo-work | Out-Null
+            Write-Output "unpacking $prof/profile.7z"
+            7z x -y -bd -opgo-work "$prof/profile.7z" | Out-Null
+            if ($LASTEXITCODE) { throw 'could not unpack the PGO profile' }
+            Get-ChildItem pgo-work | ForEach-Object { Write-Output "  $($_.Name) $($_.Length)" }
+            $want = (Get-Content pgo-work/toolset.txt -Raw).Trim()
+            $tools = "$vs\VC\Tools\MSVC\$want"
+            if (Test-Path $tools) {
+              $pgomgr = "$tools\bin\Hostx64\x64\pgomgr.exe"
+              $pgd = (Resolve-Path pgo-work\moderngekko-run.pgd).Path
+              # An empty file for stdin: Start-Process will not take NUL.
+              New-Item -ItemType File -Force pgo-work\empty-stdin.txt | Out-Null
+              Get-ChildItem pgo-work -Filter *.pgc | ForEach-Object {
+                Write-Output "merging $($_.Name)"
+                $p = Start-Process -FilePath $pgomgr -ArgumentList '/merge', "`"$($_.FullName)`"", "`"$pgd`"" `
+                       -NoNewWindow -PassThru -RedirectStandardInput "pgo-work\empty-stdin.txt" -RedirectStandardOutput "pgo-work\merge.log"
+                if (-not $p.WaitForExit(600000)) { $p.Kill(); throw "pgomgr timed out on $($_.Name)" }
+                Get-Content pgo-work\merge.log | ForEach-Object { Write-Output "  $_" }
+                if ($p.ExitCode) { throw "pgomgr failed on $($_.Name) (exit $($p.ExitCode))" }
+              }
+              $link = "/LTCG /USEPROFILE:PGD=$((Resolve-Path pgo-work\moderngekko-run.pgd).Path)"
+              $toolset = $want; $mode = 'use'
+            } else {
+              Write-Output "::warning::PGO profile needs MSVC $want, which this runner lacks -- building plain LTO. Retrain."
+              $mode = 'none'
+            }
+          } else { $mode = 'none' }
+          "mode=$mode" >> $env:GITHUB_OUTPUT
+          "link=$link" >> $env:GITHUB_OUTPUT
+          "toolset=$toolset" >> $env:GITHUB_OUTPUT
+          Write-Output "PGO mode: $mode  toolset: $toolset  link: $link"
+
       - name: Configure
         # Dolphin's own CMake drives the vendored tree. Qt and the tests are the
         # two things that pull in toolchain we do not have on the runner, and the
         # runtime is headless-capable, so both are off.
-        run: >
-          cmake -S ModernGekko -B build
-          -G "Visual Studio 17 2022" -A x64
-          -DENABLE_QT=OFF
-          -DENABLE_TESTS=OFF
-          -DENABLE_ANALYTICS=OFF
-          -DENABLE_AUTOUPDATE=OFF
+        # ENABLE_LTO: CMake IPO, i.e. /GL + /LTCG under MSVC. On Linux the same
+        # flag took -2.70% of all CPU cycles on the Steam Deck (build-deck.sh);
+        # on Windows, -2.16% (the test laptop, 16000 frames of the arcade route,
+        # n=5 each, ranges not overlapping, frame hash unchanged -- PR #61).
+        # /wd5049: under /GL, MSVC warns that the precompiled header embeds a full
+        # path (C5049), and Dolphin's PCH target builds with /WX, so the warning
+        # stopped the build. _INIT appends to MSVC's defaults; setting
+        # CMAKE_CXX_FLAGS itself would replace them and drop /EHsc.
+        # -T pins the MSVC toolset only when a profile is involved (see above).
+        # The PGO link flag goes to the runtime target alone
+        # (MODERNGEKKO_RUNTIME_LINK_FLAGS, ModernGekko/CMakeLists.txt), never
+        # to every link: dolrecomp is built in the same tree.
+        shell: pwsh
+        run: |
+          $t = '${{ steps.pgo.outputs.toolset }}'
+          $ts = if ($t) { @('-T', "v143,version=$t") } else { @() }
+          cmake -S ModernGekko -B build -G "Visual Studio 17 2022" -A x64 @ts `
+            -DENABLE_LTO=ON "-DCMAKE_CXX_FLAGS_INIT=/wd5049" `
+            "-DMODERNGEKKO_RUNTIME_LINK_FLAGS=${{ steps.pgo.outputs.link }}" `
+            -DENABLE_QT=OFF -DENABLE_TESTS=OFF -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Build runtime
         run: cmake --build build --config Release --target moderngekko-run
@@ -64,6 +152,29 @@ jobs:
             ForEach-Object { Copy-Item $_.FullName staging/ }
           Get-ChildItem staging
 
+      - name: Publish PGO training kit
+        # The instrumented exe, the .pgd its counts belong to, the PGO runtime
+        # DLL it loads, and the toolset it was built with. Its own asset name:
+        # it must never overwrite the real binaries.
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && steps.pgo.outputs.mode == 'instrument'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $t = '${{ steps.pgo.outputs.toolset }}'
+          New-Item -ItemType Directory -Force pgo-kit | Out-Null
+          Copy-Item staging/moderngekko-run.exe pgo-kit/
+          Get-ChildItem build -Recurse -Filter moderngekko-run.pgd | Select-Object -First 1 | Copy-Item -Destination pgo-kit/
+          Copy-Item "$vs\VC\Tools\MSVC\$t\bin\Hostx64\x64\pgort140.dll" pgo-kit/
+          Set-Content pgo-kit/toolset.txt $t
+          if (-not (Test-Path pgo-kit/moderngekko-run.pgd)) { throw 'no .pgd produced' }
+          Get-ChildItem pgo-kit
+          7z a -tzip RingOut-windows-x64-pgo-instrument.zip ./pgo-kit/* > $null
+          gh release view windows-latest *> $null
+          if ($LASTEXITCODE) { gh release create windows-latest --prerelease --title "Windows build (rolling)" --notes "Built from $env:GITHUB_SHA." --target $env:GITHUB_SHA }
+          gh release upload windows-latest RingOut-windows-x64-pgo-instrument.zip --clobber
+
       - name: Publish binaries
         # Was an Actions artifact uploaded on EVERY push, which is what kept the
         # shared quota full and failed unrelated workflows' uploads. Same rolling
@@ -74,7 +185,7 @@ jobs:
         # longer publishes by itself: "this built" and "everyone downloads this"
         # were the same event, and there was no way to exercise the workflow
         # without shipping the result.
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && steps.pgo.outputs.mode != 'instrument'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -98,13 +209,14 @@ jobs:
       - name: Package release
         # Always on a manual run, publish or not: this is the only way
         # package-windows.ps1 ever gets exercised.
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && steps.pgo.outputs.mode != 'instrument'
         shell: pwsh
         run: |
           .github/scripts/package-windows.ps1 `
             -BinDir staging -RepoRoot (Get-Location).Path -OutDir package
 
       - name: Publish release asset
+        # (Never for an instrumented build: see "Publish PGO training kit".)
         # OPT-IN ONLY: a dispatch with publish=true. An earlier attempt gated
         # this on a tag ref, which was wrong -- this workflow has no tag trigger,
         # so that condition could never be true and the asset would never have
@@ -112,7 +224,7 @@ jobs:
         # tags to `on.push`, and note that `paths` filters apply to tag pushes
         # too, so a tag on an existing commit usually matches nothing and the
         # run is skipped entirely.
-        if: github.event_name == 'workflow_dispatch' && inputs.publish
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && steps.pgo.outputs.mode != 'instrument'
         # A GitHub RELEASE asset, not an Actions artifact. This bundle is ~294 MB
         # per build because it carries a whole toolchain, and at the 90-day
         # artifact default it exhausted the repo's shared artifact quota -- which

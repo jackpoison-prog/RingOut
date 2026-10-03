@@ -25,9 +25,12 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --ram-bases <list>             D-form loads/stores based on these registers (e.g.\n");
     fprintf(stderr, "                                 1,2,13) skip the range test: they only reach RAM\n");
     fprintf(stderr, "  --preserve-none                Chunk functions use clang's preserve_none convention\n");
+    fprintf(stderr, "  --fp-check-once                Test MSR.FP once per straight-line run of FP\n");
+    fprintf(stderr, "                                 instructions, not before every one\n");
     fprintf(stderr, "  --twin-hot <file>              Twin chunks: a fast copy entered only at the hot PCs listed\n");
     fprintf(stderr, "                                 (\"PC [hits]\" lines) with register locals, the full chunk\n");
     fprintf(stderr, "                                 as a cold fallback for every other entry\n");
+    fprintf(stderr, "  --twin-cr                      The fast copy also keeps CR fields in write-through locals\n");
     fprintf(stderr, "  --twin-regs <list>             Registers the fast copy keeps in locals (default 1,2,13,28-31\n");
     fprintf(stderr, "                                 as 1,2,13,28,29,30,31)\n");
     fprintf(stderr, "  --direct-calls                 Call across chunks natively instead of via the chassis\n");
@@ -182,6 +185,11 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             continue;
         }
 
+        if (strcmp(arg, "--fp-check-once") == 0) {
+            opts->fp_check_once = 1;
+            continue;
+        }
+
         if (strcmp(arg, "--preserve-none") == 0) {
             opts->preserve_none = 1;
             continue;
@@ -202,6 +210,11 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
                 return 0;
             }
             opts->chunk_overhang = (unsigned)strtoul(argv[++i], NULL, 10);
+            continue;
+        }
+
+        if (strcmp(arg, "--twin-cr") == 0) {
+            opts->twin_cr = 1;
             continue;
         }
 

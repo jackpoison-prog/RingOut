@@ -17,6 +17,8 @@
 *.wbfs
 *.gcz
 *.7z
+# ...except the Windows runtime PGO profile: a .pgd and .pgc counts, no game data.
+!/ModernGekko/pgo/runtime-windows/profile.7z
 *.olk
 *.dol
 *.xbe

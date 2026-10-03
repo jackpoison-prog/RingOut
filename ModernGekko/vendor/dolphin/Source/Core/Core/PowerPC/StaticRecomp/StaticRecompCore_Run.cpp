@@ -570,6 +570,16 @@ void StaticRecompCore::OnFmvCnvFrm(u32 handle, u32 desc, u32 dst)
   // else: decoder not ready yet -> leave the buffer as-is (previous frame).
 }
 
+// STATICRECOMP_DEBUG_ID, read ONCE. It was read with getenv() at every Run()
+// entry and on every fallback step -- a string search of the environment, on
+// the emulation thread, during play: 0.43% of that thread in a Windows fight
+// profile (WPR, 2026-09-30), the same mistake the FMV switches below once made.
+static const char* DebugIdEnv()
+{
+  static const char* const value = std::getenv("STATICRECOMP_DEBUG_ID");
+  return value;
+}
+
 void StaticRecompCore::Run()
 {
   // The recomp is single-thread-bound, so scheduler migration between cores
@@ -663,7 +673,7 @@ void StaticRecompCore::Run()
   m_module_active = mem1_fits_module && m_module &&
                     (initial_game_id.empty() || initial_game_id == m_module->game_id);
 
-  if (getenv("STATICRECOMP_DEBUG_ID"))
+  if (DebugIdEnv() != nullptr)
   {
     fprintf(stderr, "[dbg] disc_game_id='%s' module_game_id='%s' module=%p active=%d ram_size=%u\n",
             initial_game_id.c_str(), m_module ? m_module->game_id : "(null)", (void*)m_module,
@@ -702,11 +712,20 @@ void StaticRecompCore::Run()
   // samples -- the single hottest instruction in the loop after the timebase
   // arithmetic -- for a flag that is almost always false.
   static const bool s_spinlog = std::getenv("STATICRECOMP_SPINLOG") != nullptr;
+  static const bool s_dispatchlog = std::getenv("STATICRECOMP_DISPATCHLOG") != nullptr;
+  // Locals, not the statics, inside the dispatch loop: the module call is
+  // opaque, so after every dispatch the compiler had to re-load each static
+  // from memory (perf annotate: these compares were ~6% of Run()). A local
+  // whose address is never taken can stay in a register across the call.
+  const bool fmv_hist_on = s_fmv_hist;
+  const bool spinlog_on = s_spinlog;
+  const bool dispatchlog_on = s_dispatchlog;
   // The FMV hook PCs, copied out of the object so the per-dispatch compares
   // below read registers, not memory. LoadModule (Init only) is their sole
   // writer, so they cannot change while Run() is on the stack.
   const StaticRecompFmvHookPcs fmv = m_fmv_pcs;
 
+  u32 game_id_check = 0;
   while (*state_ptr == CPU::State::Running)
   {
     core_timing.Advance();
@@ -717,9 +736,16 @@ void StaticRecompCore::Run()
     // it separates those from anything the guest triggered.
     if (m_watch_armed)
       PollDeterminismWatch("coretiming", ppc.pc);
-    const std::string current_game_id = SConfig::GetInstance().GetGameID();
-    m_module_active = mem1_fits_module && m_module &&
-                      (current_game_id.empty() || current_game_id == m_module->game_id);
+    // Re-checked every 64 slices, not every slice: GetGameID() takes a mutex
+    // and copies a string, a few hundred times a frame, to catch a title
+    // change that only happens when a new title boots. Noticing it up to 64
+    // slices (~3 ms) late is harmless.
+    if ((++game_id_check & 63) == 0)
+    {
+      const std::string current_game_id = SConfig::GetInstance().GetGameID();
+      m_module_active = mem1_fits_module && m_module &&
+                        (current_game_id.empty() || current_game_id == m_module->game_id);
+    }
 
     do
     {
@@ -747,7 +773,7 @@ void StaticRecompCore::Run()
           // holds the PPC arg regs r3.. in gpr[3..]). The s_fmv_* env flags are
           // read once at the top of Run(); they used to be declared here, which
           // cost a static-init guard check per dispatch. ---
-          if (s_fmv_hist)
+          if (fmv_hist_on)
             FmvHistSample(m_guest.pc);
 
           // Common path (no movie): just the start-detect compare. The frame /
@@ -853,8 +879,7 @@ void StaticRecompCore::Run()
           // round-trip. Whether that is worth attacking depends on how much of
           // the ~10.8M dispatches/sec it actually is, which is a measurement,
           // not a guess.
-          static const bool s_dispatchlog = std::getenv("STATICRECOMP_DISPATCHLOG") != nullptr;
-          const u32 dispatch_from = s_dispatchlog ? m_guest.pc : 0;
+          const u32 dispatch_from = dispatchlog_on ? m_guest.pc : 0;
 
           const u32 dbg_pc_before = m_guest.pc;
           m_module->dispatch(&m_guest, m_guest.pc);
@@ -867,7 +892,7 @@ void StaticRecompCore::Run()
             // symptom is a silent hang with a huge dispatch count and no error.
             // This found the LLVM backend's psq_load return-type mismatch in one
             // run after hours of hypotheses: it printed 0x80180BD4, a psq_l.
-            if (s_spinlog)
+            if (spinlog_on)
             {
               static u64 s_same = 0;
               static u32 s_last = 0;
@@ -881,7 +906,7 @@ void StaticRecompCore::Run()
             }
           }
 
-          if (s_dispatchlog)
+          if (dispatchlog_on)
           {
             const u32 to = m_guest.pc;
             const int ci_from = ChunkIndexOf(dispatch_from);
@@ -963,7 +988,7 @@ void StaticRecompCore::Run()
       {
         // SingleStepInner delivers synchronous exceptions itself; external
         // interrupts are delivered at slice start, as in Interpreter::Run.
-        if (const char* dbg_env = getenv("STATICRECOMP_DEBUG_ID"))
+        if (const char* dbg_env = DebugIdEnv())
         {
           static int dbg_fb_count = 0;
           const int dbg_cap = atoi(dbg_env) > 1 ? atoi(dbg_env) : 20;

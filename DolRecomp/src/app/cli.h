@@ -30,7 +30,9 @@ typedef struct {
     unsigned chunk_overhang; // --chunk-overhang <max>: emit past the window to the first exit
     const char* ram_bases;   // --ram-bases <list>: base registers that only address RAM
     int preserve_none;       // --preserve-none: chunk functions save no callee-saved registers
+    int fp_check_once;       // --fp-check-once: one MSR.FP test per straight-line run
     const char* twin_hot;   // --twin-hot <file>: hot entry PCs -> twin chunks
+    int twin_cr;            // --twin-cr: the fast copy also keeps CR fields in locals
     const char* twin_regs;  // --twin-regs <list>: guest registers kept in locals
     int direct_calls;   // --direct-calls
     int self_calls;     // --self-calls (needs --direct-calls)

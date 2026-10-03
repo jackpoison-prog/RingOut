@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
     emit_set_leader_cases(opts.leader_cases != 0);
     emit_set_chunk_overhang(opts.chunk_overhang);
     emit_set_preserve_none(opts.preserve_none != 0);
+    emit_set_fp_check_once(opts.fp_check_once != 0);
     if (opts.ram_bases) {
         u32 mask = 0;
         const char* p = opts.ram_bases;
@@ -57,6 +58,7 @@ int main(int argc, char** argv) {
         if (!twin_load_hot(opts.twin_hot) ||
             !twin_set_regs(opts.twin_regs ? opts.twin_regs : "1,2,13,28,29,30,31"))
             return 1;
+        twin_set_cr(opts.twin_cr);
         fprintf(stderr, "twin chunks: %u hot entry PCs from %s\n", twin_hot_count(), opts.twin_hot);
     }
     emit_set_direct_calls(opts.direct_calls != 0);

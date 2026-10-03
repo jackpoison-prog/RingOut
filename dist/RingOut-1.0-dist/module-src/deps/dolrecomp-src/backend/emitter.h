@@ -53,6 +53,8 @@ void emit_set_chunk_overhang(u32 max_insts);
 /* bit i: D-form accesses based on guest ri can only reach main RAM. */
 void emit_set_ram_bases(u32 mask);
 void emit_set_preserve_none(bool enable);
+/* --fp-check-once: see emitter.c. */
+void emit_set_fp_check_once(bool enable);
 bool emit_preserve_none_enabled(void);
 /* "DOLRECOMP_CHUNK_FN " under --preserve-none, else "". */
 const char* emit_chunk_cc(void);

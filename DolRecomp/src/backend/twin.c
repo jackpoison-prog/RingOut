@@ -40,6 +40,7 @@ static u32 s_hot_count = 0;
 static u32 s_regs = 0;            /* bit i = keep guest ri in a local */
 static int s_ratio = 0;           /* --twin-regs ratio: choose per chunk */
 static int s_enabled = 0;
+static int s_cr = 0;              /* --twin-cr: CR fields in locals too */
 
 static int cmp_u32(const void* a, const void* b) {
     u32 x = *(const u32*)a, y = *(const u32*)b;
@@ -105,6 +106,7 @@ int twin_set_regs(const char* list) {
     return 1;
 }
 
+void twin_set_cr(int enable) { s_cr = enable; }
 int twin_enabled(void) { return s_enabled; }
 u32 twin_hot_count(void) { return s_hot_count; }
 
@@ -133,29 +135,35 @@ static void bput(Buf* b, const char* s, size_t n) {
 }
 static void bputs(Buf* b, const char* s) { bput(b, s, strlen(s)); }
 
-/* Parse "ctx->gpr[N]" at s; returns N or -1, *len = length matched. */
-static int gpr_at(const char* s, size_t* len) {
-    static const char pre[] = "ctx->gpr[";
+/* A guest state array the fast copy can hold in locals: "ctx->gpr[N]" as
+ * dr_gN, and under --twin-cr "ctx->crf[N]" (one CR field per byte) as dr_cN. */
+typedef struct { const char* pre; size_t pre_len; int max; const char* local; } Field;
+static const Field kGpr = {"ctx->gpr[", 9, 31, "dr_g"};
+static const Field kCr = {"ctx->crf[", 9, 7, "dr_c"};
+
+/* Parse "<pre>N]" at s; returns N or -1, *len = length matched. */
+static int field_at(const Field* f, const char* s, size_t* len) {
     int n = 0, digits = 0;
     const char* q;
-    if (strncmp(s, pre, sizeof pre - 1) != 0)
+    if (strncmp(s, f->pre, f->pre_len) != 0)
         return -1;
-    q = s + sizeof pre - 1;
+    q = s + f->pre_len;
     while (isdigit((unsigned char)*q)) { n = n * 10 + (*q - '0'); q++; digits++; }
-    if (!digits || *q != ']' || n > 31)
+    if (!digits || *q != ']' || n > f->max)
         return -1;
     *len = (size_t)(q + 1 - s);
     return n;
 }
+static int gpr_at(const char* s, size_t* len) { return field_at(&kGpr, s, len); }
 
-/* Copy [s, e) replacing reads of kept registers with their locals. */
-static void put_reads(Buf* o, const char* s, const char* e, u32 keep) {
+/* Copy [s, e) replacing reads of kept fields with their locals. */
+static void put_reads(Buf* o, const char* s, const char* e, u32 keep, const Field* f) {
     while (s < e) {
         size_t len;
-        int r = gpr_at(s, &len);
+        int r = field_at(f, s, &len);
         if (r >= 0 && s + len <= e && (keep >> r & 1u)) {
             char tmp[16];
-            snprintf(tmp, sizeof tmp, "dr_g%d", r);
+            snprintf(tmp, sizeof tmp, "%s%d", f->local, r);
             bputs(o, tmp);
             s += len;
         } else {
@@ -165,25 +173,26 @@ static void put_reads(Buf* o, const char* s, const char* e, u32 keep) {
     }
 }
 
-/* One line of the fast copy: writes `ctx->gpr[N] = E;` of a kept register
- * become `ctx->gpr[N] = dr_gN = (E');`, every other kept read becomes dr_gN. */
-static void rewrite_line(Buf* o, const char* s, const char* e, u32 keep) {
+/* One line of the fast copy: writes `<pre>N] = E;` of a kept field become
+ * `<pre>N] = <local>N = (E');` (write-through, so ctx stays current for exits,
+ * calls and exceptions), every other kept read becomes <local>N. */
+static void rewrite_line(Buf* o, const char* s, const char* e, u32 keep, const Field* f) {
     while (s < e) {
         size_t len;
-        int r = gpr_at(s, &len);
+        int r = field_at(f, s, &len);
         if (r >= 0 && s + len + 3 <= e && strncmp(s + len, " = ", 3) == 0) {
             const char* ex = s + len + 3;
             const char* semi = memchr(ex, ';', (size_t)(e - ex));
             if (semi) {
                 char tmp[48];
                 if (keep >> r & 1u) {
-                    snprintf(tmp, sizeof tmp, "ctx->gpr[%d] = dr_g%d = (", r, r);
+                    snprintf(tmp, sizeof tmp, "%s%d] = %s%d = (", f->pre, r, f->local, r);
                     bputs(o, tmp);
-                    put_reads(o, ex, semi, keep);
+                    put_reads(o, ex, semi, keep, f);
                     bputs(o, ")");
                 } else {
                     bput(o, s, len + 3);
-                    put_reads(o, ex, semi, keep);
+                    put_reads(o, ex, semi, keep, f);
                 }
                 s = semi;               /* the ';' is copied by the loop */
                 continue;
@@ -191,7 +200,7 @@ static void rewrite_line(Buf* o, const char* s, const char* e, u32 keep) {
         }
         if (r >= 0 && (keep >> r & 1u)) {
             char tmp[16];
-            snprintf(tmp, sizeof tmp, "dr_g%d", r);
+            snprintf(tmp, sizeof tmp, "%s%d", f->local, r);
             bputs(o, tmp);
             s += len;
             continue;
@@ -199,6 +208,15 @@ static void rewrite_line(Buf* o, const char* s, const char* e, u32 keep) {
         bput(o, s, 1);
         s++;
     }
+}
+
+static void put_cr_reload(Buf* o, u32 fields) {
+    char tmp[48];
+    for (int r = 0; r < 8; r++)
+        if (fields >> r & 1u) {
+            snprintf(tmp, sizeof tmp, " dr_c%d = ctx->crf[%d];", r, r);
+            bputs(o, tmp);
+        }
 }
 
 static void put_reload(Buf* o, u32 regs, int from) {
@@ -211,19 +229,20 @@ static void put_reload(Buf* o, u32 regs, int from) {
 }
 
 int twin_write(FILE* out, const char* text, size_t len, u32 func_addr) {
-    char sig[64], cold_sig[128], dflt[128];
+    char sig[64], cold_sig[128], dflt[192];
     const char* p = text;
     const char* end = text + len;
     Buf fast = {0};
-    u32 used = 0;
-    int locals;
+    u32 used = 0, cr_used = 0;
+    int locals, gpr_locals, cr_locals;
 
     const char* cc = emit_chunk_cc();
     snprintf(sig, sizeof sig, "%svoid func_%08X(CPUState* ctx) {", cc, func_addr);
     snprintf(cold_sig, sizeof cold_sig,
              "__attribute__((noinline, cold)) %svoid func_%08X_cold(CPUState* ctx) {", cc, func_addr);
     snprintf(dflt, sizeof dflt,
-             "    default: { %svoid func_%08X_cold(CPUState* ctx); func_%08X_cold(ctx); return; }",
+             "    default: { DOLRECOMP_TWIN_MISS(ctx->pc); %svoid func_%08X_cold(CPUState* ctx); "
+             "func_%08X_cold(ctx); return; }",
              cc, func_addr, func_addr);
 
     /* cold copy */
@@ -268,7 +287,30 @@ int twin_write(FILE* out, const char* text, size_t len, u32 func_addr) {
     }
     /* the mask travels as a parameter: chunks are written on -jN worker
      * threads, and a shared static mask raced (a chunk got another's set) */
-    locals = used && !strstr(text, "ctx->gpr[reg]");
+    gpr_locals = used && !strstr(text, "ctx->gpr[reg]");
+    /* --twin-cr: every CR field the chunk names with a literal index. A chunk
+     * that indexes the CR dynamically keeps it in ctx; so far none does -- mtcrf
+     * and mcrf are emitted one literal field at a time. Nothing outside the
+     * chunk text writes crf except a called chunk and the instruction fallback,
+     * both reload points below; cpu_cr_get (mfcr) reads ctx, which write-through
+     * keeps current. */
+    if (s_cr) {
+        int dynamic = 0;
+        for (const char* q = text; (q = strstr(q, "ctx->crf[")) != NULL; q++) {
+            size_t l;
+            int r = field_at(&kCr, q, &l);
+            if (r >= 0)
+                cr_used |= 1u << r;
+            else
+                dynamic = 1;
+        }
+        if (dynamic)
+            cr_used = 0;
+    }
+    cr_locals = cr_used != 0;
+    if (!gpr_locals)
+        used = 0;
+    locals = gpr_locals || cr_locals;
 
     fputs("\n/* ---- fast copy ---- */\n", out);
     while (p < end) {
@@ -289,15 +331,28 @@ int twin_write(FILE* out, const char* text, size_t len, u32 func_addr) {
             char tmp[48];
             int first = 1;
             bput(&fast, p, ll + 1);
-            bputs(&fast, "    u32");
-            for (int r = 0; r < 32; r++)
-                if (used >> r & 1u) {
-                    snprintf(tmp, sizeof tmp, "%s dr_g%d = ctx->gpr[%d]", first ? "" : ",", r, r);
-                    bputs(&fast, tmp);
-                    first = 0;
-                }
-            bputs(&fast, ";\n");
-        } else if (find_in(p, ll, "r < 32; r++, ea += 4) ctx->gpr[r] = mem_read32(ctx, ea);", 56)) {
+            if (used) {
+                bputs(&fast, "    u32");
+                for (int r = 0; r < 32; r++)
+                    if (used >> r & 1u) {
+                        snprintf(tmp, sizeof tmp, "%s dr_g%d = ctx->gpr[%d]", first ? "" : ",", r, r);
+                        bputs(&fast, tmp);
+                        first = 0;
+                    }
+                bputs(&fast, ";\n");
+            }
+            if (cr_used) {
+                first = 1;
+                bputs(&fast, "    u8");
+                for (int r = 0; r < 8; r++)
+                    if (cr_used >> r & 1u) {
+                        snprintf(tmp, sizeof tmp, "%s dr_c%d = ctx->crf[%d]", first ? "" : ",", r, r);
+                        bputs(&fast, tmp);
+                        first = 0;
+                    }
+                bputs(&fast, ";\n");
+            }
+        } else if (used && find_in(p, ll, "r < 32; r++, ea += 4) ctx->gpr[r] = mem_read32(ctx, ea);", 56)) {
             int from = 0;
             const char* f = find_in(p, ll, "for (u32 r = ", 13);
             if (f) from = atoi(f + 13);
@@ -307,9 +362,18 @@ int twin_write(FILE* out, const char* text, size_t len, u32 func_addr) {
         } else if (find_in(p, ll, "DOLRECOMP_DC_RELOAD(ctx);", 25)) {
             bput(&fast, p, ll);
             put_reload(&fast, used, 0);
+            put_cr_reload(&fast, cr_used);
             bputs(&fast, "\n");
-        } else if (find_in(p, ll, "ctx->gpr[", 9)) {
-            rewrite_line(&fast, p, le, used);
+        } else if ((used && find_in(p, ll, "ctx->gpr[", 9)) || (cr_used && find_in(p, ll, "ctx->crf[", 9))) {
+            /* GPRs first, then CR fields over the result */
+            Buf g = {0};
+            rewrite_line(&g, p, le, used, &kGpr);
+            if (cr_used) {
+                rewrite_line(&fast, g.p, g.p + g.n, cr_used, &kCr);
+            } else {
+                bput(&fast, g.p, g.n);
+            }
+            free(g.p);
             bputs(&fast, "\n");
         } else {
             bput(&fast, p, ll + (nl ? 1 : 0));

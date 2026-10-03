@@ -3,6 +3,8 @@
 #include "AudioCommon/AudioCommon.h"
 #include "Common/Config/Config.h"
 #include "Common/HookableEvent.h"
+#include "VideoCommon/VideoBackendBase.h"
+
 #include "Common/MsgHandler.h"
 #include "Core/Boot/Boot.h"
 #include "Core/Boot/BootManager.h"
@@ -51,6 +53,14 @@
 #include <thread>
 #include <utility>
 
+#ifdef _WIN32
+#include <windows.h>  // LoadLibraryW: probing vulkan-1.dll before honouring a Vulkan pick
+// Types only (VK_NO_PROTOTYPES): the probe below resolves everything through
+// vkGetInstanceProcAddr, so nothing links against the loader.
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan_core.h>
+#endif
+
 #ifndef MODERNGEKKO_PROJECT_NAME
 #define MODERNGEKKO_PROJECT_NAME "Ring Out"
 #endif
@@ -76,7 +86,7 @@ std::unique_ptr<BootSessionData> s_boot_session_data;
 
 // Net-wait telemetry decoration removed: NetPlay::InputWaitTelemetry /
 // GetInputWaitTelemetry live only in an unpushed RecompCore fork. The title is
-// just "<title> | <fps> FPS", in netplay as well as single player.
+// "<title> | <renderer> | <fps> FPS", in netplay as well as single player.
 std::string FormatWindowTitle(const std::string &title, double fps) {
   if (!std::isfinite(fps) || fps < 0.0)
     fps = 0.0;
@@ -103,8 +113,13 @@ void Host_UpdateTitle(const std::string &) {
                  perf.GetSpeed() * 100.0, perf.GetFPS(), perf.GetVPS());
 
   std::string title = s_window_title;
-  if (s_show_fps_in_title &&
-      s_platform->GetWindowSystemInfo().type != WindowSystemType::Headless)
+  const bool windowed =
+      s_platform->GetWindowSystemInfo().type != WindowSystemType::Headless;
+  // The renderer actually running, not the menu's pending pick: with several
+  // on Windows, the title is the one place that shows which one this is.
+  if (windowed && g_video_backend)
+    title += " | " + g_video_backend->GetDisplayName();
+  if (s_show_fps_in_title && windowed)
     title = FormatWindowTitle(title, perf.GetFPS());
   s_platform->SetTitle(title);
 }
@@ -508,21 +523,114 @@ void ApplyCoreSettings(const GameMetadata &metadata) {
     Config::SetBase(Config::MAIN_STATICRECOMP_IDLE_PC, *metadata.idle_pc);
 }
 
-void ApplyGraphicsSettings(const GraphicsSettings &graphics, bool headless) {
-  if (!graphics.backend.empty())
-    Config::SetBase(Config::MAIN_GFX_BACKEND, graphics.backend);
+// The renderer picked in the in-game menu (RecompMenu.cpp, same key). Applied
+// here, at startup, because Dolphin cannot switch backends under a running
+// session. Only honoured if this build has that backend: a Dolphin.ini copied
+// from Windows ("D3D12") to a Linux install must not leave the game unable to
+// draw.
+const Config::Info<std::string> RECOMP_RENDERER{{Config::System::Main, "RecompMenu", "Renderer"},
+                                                ""};
+
+bool RendererIsBuiltIn(const std::string &name) {
+  for (const auto &backend : VideoBackendBase::GetAvailableBackends())
+    if (backend->GetConfigName() == name)
+      return true;
+  return false;
+}
+
+// Whether a menu-picked renderer can actually start here. Built in is not
+// enough for Vulkan on Windows: it needs vulkan-1.dll from the GPU driver, and
+// without it the launch dies before the menu exists -- the player could never
+// get back to change it. So probe the loader and fall back to the default.
 #ifdef _WIN32
-  // Default to Direct3D on Windows. Vulkan is only present if the GPU driver
-  // installed vulkan-1.dll, and on a machine without it the failure is fatal
-  // and opaque -- "Failed to load Vulkan library", then "Failed to initialize
-  // video backend!", and the emulated CPU never starts (native=0). D3D11 ships
-  // with Windows itself, so it always works. This is the BASE layer, so a
-  // backend chosen in the settings menu still wins.
-  else if (!headless)
-    Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("D3D"));
+// Whether Vulkan can actually run here, not just whether its loader exists.
+// vulkan-1.dll is installed by some applications on machines whose GPU driver
+// has no Vulkan at all, and with Vulkan as the default such a machine would
+// fail at launch -- before the menu exists to switch away. So: load the
+// loader, create a bare instance, and count the GPUs it reports.
+bool VulkanHasGpu() {
+  HMODULE lib = LoadLibraryW(L"vulkan-1.dll");
+  if (!lib)
+    return false;
+  bool ok = false;
+  const auto get_proc =
+      reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(lib, "vkGetInstanceProcAddr"));
+  const auto create = get_proc ? reinterpret_cast<PFN_vkCreateInstance>(
+                                     get_proc(VK_NULL_HANDLE, "vkCreateInstance"))
+                               : nullptr;
+  VkApplicationInfo app{};
+  app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+  app.apiVersion = VK_API_VERSION_1_0;
+  VkInstanceCreateInfo info{};
+  info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+  info.pApplicationInfo = &app;
+  VkInstance instance = VK_NULL_HANDLE;
+  if (create && create(&info, nullptr, &instance) == VK_SUCCESS) {
+    const auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        get_proc(instance, "vkEnumeratePhysicalDevices"));
+    const auto destroy =
+        reinterpret_cast<PFN_vkDestroyInstance>(get_proc(instance, "vkDestroyInstance"));
+    uint32_t gpus = 0;
+    ok = enumerate && enumerate(instance, &gpus, nullptr) == VK_SUCCESS && gpus > 0;
+    if (destroy)
+      destroy(instance, nullptr);
+  }
+  FreeLibrary(lib);
+  return ok;
+}
 #endif
-  else if (headless)
-    Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("Null"));
+
+bool RendererCanStart(const std::string &name) {
+  if (!RendererIsBuiltIn(name))
+    return false;
+#ifndef _WIN32
+  // OpenGL is compiled into the Linux runtime but cannot initialise there
+  // ("Failed to initialize video backend!"); the menu does not offer it, and an
+  // ini that names it anyway must not lock the player out.
+  if (name == "OGL")
+    return false;
+#endif
+#ifdef _WIN32
+  if (name == "Vulkan" && !VulkanHasGpu())
+    return false;
+#endif
+  return true;
+}
+
+void ApplyGraphicsSettings(const GraphicsSettings &graphics, bool headless) {
+  const std::string chosen = Config::Get(RECOMP_RENDERER);
+  std::string backend;
+  if (!graphics.backend.empty()) {
+    backend = graphics.backend;  // an explicit --graphics wins
+  } else if (headless) {
+    backend = "Null";
+  } else if (!chosen.empty() && RendererCanStart(chosen)) {
+    backend = chosen;  // picked in the in-game menu
+  } else {
+    if (!chosen.empty())
+      std::fprintf(stderr, "[video] renderer '%s' from the menu cannot start here\n",
+                   chosen.c_str());
+#ifdef _WIN32
+    // Vulkan on Windows too, wherever it can run: on the test laptop (AMD APU,
+    // 2026-09-30) Direct3D 11 cost 36% more CPU per frame with a cold shader
+    // cache -- over half of it Microsoft's HLSL compiler -- and hands-on play
+    // was faster on Vulkan with the cache warm as well. It is also the only
+    // renderer Linux and the Deck run, so the best-tested one. Direct3D 11
+    // ships with Windows itself, so it stays the fallback for machines with no
+    // working Vulkan driver. Every renderer remains one menu pick away.
+    if (RendererCanStart("Vulkan")) {
+      backend = "Vulkan";
+    } else {
+      std::fprintf(stderr, "[video] no working Vulkan driver -- using Direct3D 11\n");
+      backend = "D3D";
+    }
+#else
+    backend = "Vulkan";
+#endif
+  }
+  Config::SetBase(Config::MAIN_GFX_BACKEND, backend);
+  if (!headless)
+    std::fprintf(stderr, "[video] renderer: %s\n", backend.c_str());
   if (graphics.internal_resolution_scale)
     Config::SetBase(Config::GFX_EFB_SCALE, *graphics.internal_resolution_scale);
   // --widescreen still sets the widescreen hack + ForceWide pair, which is what

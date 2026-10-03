@@ -31,6 +31,11 @@ DOCKERFILE
 
 echo
 echo "==> configuring"
+# ENABLE_LTO (Dolphin's option, off by default): the runtime is about a quarter
+# of the CPU time in gameplay and had never been built with it. Measured on the
+# Steam Deck with the same module, 16000 frames of the arcade route, n=8 each:
+# -2.70% of ALL cycles (the runtime roughly 10% cheaper), frame hash unchanged,
+# binary 28.1 -> 19.3 MB, glibc floor still 2.36. The deck.yml job matches.
 podman run --rm --userns=keep-id -v "$REPO:/src:Z" -w /src "$IMAGE" bash -c '
   set -e
   # Guarded: an image built before ccache joined deck-deps.txt still works,
@@ -38,8 +43,13 @@ podman run --rm --userns=keep-id -v "$REPO:/src:Z" -w /src "$IMAGE" bash -c '
   LAUNCH=""
   command -v ccache >/dev/null && \
     LAUNCH="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+  # Runtime PGO on top of LTO when the committed profile is present (see
+  # runtime-pgo-flags.sh): a further -4.51% of all cycles on the Steam Deck.
+  PGO="$(/src/.github/scripts/runtime-pgo-flags.sh /src/build-deck)"
   cmake -S ModernGekko -B build-deck -GNinja \
     -DCMAKE_BUILD_TYPE=Release \
+    -DENABLE_LTO=ON \
+    -DCMAKE_C_FLAGS="$PGO" -DCMAKE_CXX_FLAGS="$PGO" -DCMAKE_EXE_LINKER_FLAGS="$PGO" \
     -DENABLE_QT=OFF \
     -DENABLE_TESTS=OFF \
     -DENABLE_ANALYTICS=OFF \

@@ -448,10 +448,11 @@ int RunMain(int argc, char **argv) {
     config.module =
         moderngekko::ModuleSource::DynamicPath(std::move(module_path));
 
-#if defined(__linux__) || defined(_WIN32)
-  if (!config.headless && config.graphics.backend.empty())
-    config.graphics.backend = "Vulkan";
-#endif
+  // No default backend here: an empty one means "not specified", and the
+  // runtime then applies the renderer picked in the in-game menu, or its own
+  // platform default (ApplyGraphicsSettings). Filling in "Vulkan" here made it
+  // look explicit and overrode both -- the menu's choice never took effect, and
+  // the runtime's Windows fallback for a missing vulkan-1.dll never ran.
 
   if (netplay_role) {
     moderngekko::frontend::NetplayOptions options;

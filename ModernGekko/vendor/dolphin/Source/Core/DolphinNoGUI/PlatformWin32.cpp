@@ -13,6 +13,7 @@
 
 #include <Windows.h>
 #include <climits>
+#include <string>
 #include <dwmapi.h>
 #include <thread>  // std::this_thread::sleep_for; MSVC pulls this in indirectly
 
@@ -62,6 +63,38 @@ PlatformWin32::~PlatformWin32()
     DestroyWindow(m_hwnd);
 }
 
+// The window icon: the game's own, which setup.ps1 extracts from the player's
+// disc into <install>\art\icon.ico (the shortcuts use the same file). It cannot
+// be compiled into the exe -- the artwork is the publisher's, and this exe is
+// built before any disc exists. Upstream Dolphin loads IDI_ICON1 from its .rc,
+// but LoadIcon(nullptr, ...) asks for a SYSTEM icon, and ours has no icon
+// resource either: players saw a yellow warning triangle in the title bar and
+// taskbar. Falls back to the plain application icon.
+static HICON LoadGameIcon(int size)
+{
+  wchar_t exe[MAX_PATH];
+  const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+  if (n > 0 && n < MAX_PATH)
+  {
+    std::wstring path(exe, n);
+    const size_t bin = path.find_last_of(L"\\/");
+    if (bin != std::wstring::npos)
+    {
+      path.resize(bin);  // ...\bin
+      const size_t root = path.find_last_of(L"\\/");
+      if (root != std::wstring::npos)
+      {
+        path.resize(root);  // the install folder
+        path += L"\\art\\icon.ico";
+        if (HICON icon = static_cast<HICON>(
+                LoadImageW(nullptr, path.c_str(), IMAGE_ICON, size, size, LR_LOADFROMFILE)))
+          return icon;
+      }
+    }
+  }
+  return LoadIcon(nullptr, IDI_APPLICATION);
+}
+
 bool PlatformWin32::RegisterRenderWindowClass()
 {
   WNDCLASSEX wc = {};
@@ -71,7 +104,7 @@ bool PlatformWin32::RegisterRenderWindowClass()
   wc.cbClsExtra = 0;
   wc.cbWndExtra = 0;
   wc.hInstance = GetModuleHandle(nullptr);
-  wc.hIcon = LoadIcon(nullptr, IDI_ICON1);
+  wc.hIcon = LoadGameIcon(GetSystemMetrics(SM_CXICON));
   wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
   // Black, not COLOR_WINDOW (white): any part of the window the swapchain has
   // not covered yet -- mid-resize, or entering fullscreen -- shows this brush,
@@ -79,7 +112,7 @@ bool PlatformWin32::RegisterRenderWindowClass()
   wc.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
   wc.lpszMenuName = nullptr;
   wc.lpszClassName = WINDOW_CLASS_NAME;
-  wc.hIconSm = LoadIcon(nullptr, IDI_ICON1);
+  wc.hIconSm = LoadGameIcon(GetSystemMetrics(SM_CXSMICON));
 
   // ERROR_CLASS_ALREADY_EXISTS is not a failure here. A window class is
   // registered per PROCESS and is never unregistered, so the second session in

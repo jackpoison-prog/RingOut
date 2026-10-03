@@ -234,12 +234,15 @@ if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('--chunk-ov
 # RAM bases, as in setup.sh: stores based on r1, r2 or r13 (stack pointer and the
 # small-data bases) skip the RAM/MMIO range test. All four discs.
 if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSJAF', 'GRSPAF')) { $LeaderCases += @('--ram-bases', '1,2,13') }
+# One MSR.FP test per straight-line run of FP instructions, as in setup.sh. All four discs.
+if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSJAF', 'GRSPAF')) { $LeaderCases += @('--fp-check-once') }
 # Twin chunks, as in setup.sh: a fast copy of each chunk entered only at the
 # entry PCs a training run used (the list ships beside the profile), the
 # ordinary chunk as a cold fallback. A disc without a list builds as before.
 $Twin = @()
 $HotList = Join-Path $Here "module-src\profiles\$DiscId.hot"
-if (Test-Path $HotList) { $Twin = @('--twin-hot', $HotList, '--twin-regs', 'ratio') }
+# --twin-cr as in setup.sh: CR fields in write-through locals in the fast copy.
+if (Test-Path $HotList) { $Twin = @('--twin-hot', $HotList, '--twin-regs', 'ratio', '--twin-cr') }
 & (Join-Path $Here 'tools\dolrecomp.exe') --gamecube (Join-Path $Game 'sys\main.dol') --idle-pc auto @LeaderCases @Twin "-j$jobs" (Join-Path $Work 'out')
 if ($LASTEXITCODE -ne 0) { Die "Recompilation failed." }
 
@@ -344,15 +347,25 @@ if ((Test-Path -LiteralPath $gcArt) -and (Test-Path -LiteralPath $Python)) {
     if (Test-Path -LiteralPath $ico) {
         # Repoint the shortcuts the installer made. They were created before a
         # disc existed, so they could not have had the game's icon until now.
+        # ONLY a shortcut that launches THIS folder: the names are fixed, so a
+        # second copy (an unzipped package, a test folder) finds the INSTALLED
+        # game's shortcuts too, and used to point their icon at itself -- the
+        # icon then broke when that copy was deleted.
         $shell = New-Object -ComObject WScript.Shell
+        $mine = [IO.Path]::GetFullPath($Here).TrimEnd('\') + '\'
         foreach ($lnk in @(
             (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Ring Out.lnk'),
             (Join-Path ([Environment]::GetFolderPath('Programs')) 'Ring Out\Ring Out.lnk'))) {
             if (Test-Path -LiteralPath $lnk) {
                 $sc = $shell.CreateShortcut($lnk)
-                $sc.IconLocation = $ico
-                $sc.Save()
-                Write-Host "    icon set on $(Split-Path $lnk -Leaf)"
+                $target = $sc.TargetPath
+                if ($target -and [IO.Path]::GetFullPath($target).StartsWith($mine, [StringComparison]::OrdinalIgnoreCase)) {
+                    $sc.IconLocation = $ico
+                    $sc.Save()
+                    Write-Host "    icon set on $(Split-Path $lnk -Leaf)"
+                } else {
+                    Write-Host "    $(Split-Path $lnk -Leaf) launches another copy ($target) -- left alone"
+                }
             }
         }
     }

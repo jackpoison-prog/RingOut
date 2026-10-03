@@ -126,6 +126,9 @@ if [ -d "$STAGE/module-src/profiles" ]; then
   for prof in "$STAGE/module-src/profiles"/*.profdata; do
     [ -e "$prof" ] || continue
     id="$(basename "$prof" .profdata)"
+    # <ID>.clangNN.profdata is the same disc trained on clang NN (setup.sh picks it by
+    # the player's clang major); strip the suffix before checking the ID.
+    case "$id" in *.clang[0-9]*) id="${id%%.clang*}" ;; esac
     # GRSEPS is the SC2 Plus mod. It gets its own file since the US disc's
     # profile is trained with --leader-cases and Plus is built without it.
     case "$id" in

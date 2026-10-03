@@ -54,6 +54,29 @@ static const u32 entry_raws[] = {
 };
 #define NENTRY ((u32)(sizeof(entry_raws) / sizeof(entry_raws[0])))
 
+/* --fp-check-once: two FP ops in a run, then mtmsr, then another FP op. */
+#define FBASE 0x80006000u
+static const u32 fp_raws[] = {
+    0xC0030000u,  /* 80006000 lfs f0, 0(r3)   leader: must test MSR.FP       */
+    0xC0230004u,  /* 80006004 lfs f1, 4(r3)   tested already: may skip it    */
+    0x7C800124u,  /* 80006008 mtmsr r4        can turn FP off                */
+    0xC0430008u,  /* 8000600C lfs f2, 8(r3)   after mtmsr: must test again   */
+    0x4E800020u,  /* 80006010 blr                                            */
+};
+#define NFP ((u32)(sizeof(fp_raws) / sizeof(fp_raws[0])))
+
+/* An FP op, then a mid-block entry that is NOT an FP op (a direct-call return
+   point or a cross-chunk target), then another FP op. Code entering at the nop
+   has not tested MSR.FP, so the second lfs must test on that path. */
+#define EFBASE 0x80007000u
+static const u32 fp_entry_raws[] = {
+    0xC0030000u,  /* 80007000 lfs f0, 0(r3)                                  */
+    0x60000000u,  /* 80007004 nop   <- an entry from another chunk           */
+    0xC0230004u,  /* 80007008 lfs f1, 4(r3)                                  */
+    0x4E800020u,  /* 8000700C blr                                            */
+};
+#define NFPE ((u32)(sizeof(fp_entry_raws) / sizeof(fp_entry_raws[0])))
+
 static int failures;
 
 static char* emit_raws_to_string(const u32* words, u32 count, u32 base) {
@@ -406,6 +429,51 @@ int main(void) {
         expect("the overhang stops before a PC the run loop must see",
                emit_overhang_length(ov, 2u, 3u, NULL, 0u) == 0u, NULL);
         emit_set_chunk_overhang(0u);
+    }
+
+    /* --fp-check-once. Off: byte-identical, no fpok labels. On: the second FP
+       op of a run jumps past its test on fall-through, but label_ (the switch
+       case every FP op has, for the lazy-FPU resume) still tests; a leader and
+       anything after mtmsr test on the straight-line path too. */
+    {
+        char* fp_off = emit_raws_to_string(fp_raws, NFP, FBASE);
+        if (!fp_off) return 1;
+        expect("--fp-check-once off: no fpok labels", strstr(fp_off, "fpok_") == NULL, fp_off);
+        emit_set_fp_check_once(true);
+        char* fp_on = emit_raws_to_string(fp_raws, NFP, FBASE);
+        emit_set_fp_check_once(false);
+        if (!fp_on) { free(fp_off); return 1; }
+        expect("the run's second FP op skips its test on fall-through",
+               strstr(fp_on, "    goto fpok_80006004;\nlabel_80006004:") != NULL, fp_on);
+        const char* l4 = strstr(fp_on, "label_80006004:");
+        const char* ok4 = strstr(fp_on, "fpok_80006004:");
+        const char* t4 = strstr(fp_on, "ppc_fp_available(ctx, 0x80006004u)");
+        expect("label_ still tests (switch entry after an FP exception)",
+               l4 && t4 && ok4 && l4 < t4 && t4 < ok4, fp_on);
+        expect("the switch still enters at label_, not past the test",
+               has_case(fp_on, 0x80006004u), fp_on);
+        expect("a leader is never skipped", strstr(fp_on, "goto fpok_80006000;") == NULL, fp_on);
+        expect("mtmsr resets it", strstr(fp_on, "goto fpok_8000600C;") == NULL, fp_on);
+        expect("every FP op keeps its test",
+               strstr(fp_on, "ppc_fp_available(ctx, 0x80006000u)") &&
+               strstr(fp_on, "ppc_fp_available(ctx, 0x8000600Cu)") && t4, fp_on);
+        free(fp_off);
+        free(fp_on);
+    }
+    {
+        static const u32 mid_entry[] = { 0x80007004u };
+        emit_set_leader_cases(true);
+        emit_set_entry_targets(mid_entry, 1u);
+        emit_set_fp_check_once(true);
+        char* text = emit_raws_to_string(fp_entry_raws, NFPE, EFBASE);
+        emit_set_fp_check_once(false);
+        emit_set_entry_targets(NULL, 0u);
+        emit_set_leader_cases(false);
+        if (!text) return 1;
+        expect("the mid-block entry is a switch case", has_case(text, 0x80007004u), text);
+        expect("an FP op after a non-FP entry must test (FP may be off there)",
+               strstr(text, "goto fpok_80007008;") == NULL, text);
+        free(text);
     }
 
     return failures ? 1 : 0;

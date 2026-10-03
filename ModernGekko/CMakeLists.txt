@@ -330,6 +330,13 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     endif()
     target_include_directories(moderngekko PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
+    # The Windows Vulkan probe (dolphin_runtime.cpp, VulkanHasGpu) needs the
+    # Vulkan types; vulkan_core.h includes its vk_video/ headers from this root,
+    # so it has to be an include directory, not a relative #include.
+    if(WIN32)
+        target_include_directories(moderngekko PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Externals/Vulkan-Headers/include")
+    endif()
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         target_compile_definitions(moderngekko PRIVATE _ARCH_64=1)
     else()
@@ -516,6 +523,14 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     # be produced against an older glibc, e.g. in a Steam Runtime container.
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_link_options(moderngekko-run PRIVATE -static-libstdc++ -static-libgcc)
+    endif()
+    # Windows runtime PGO, set by windows.yml: /GENPROFILE to build the
+    # training exe, /USEPROFILE:PGD=<merged .pgd> to apply it. On this target
+    # only -- dolrecomp links in the same tree and must be neither instrumented
+    # nor matched against the runtime's profile.
+    if(MSVC AND MODERNGEKKO_RUNTIME_LINK_FLAGS)
+        separate_arguments(_moderngekko_rt_link WINDOWS_COMMAND "${MODERNGEKKO_RUNTIME_LINK_FLAGS}")
+        target_link_options(moderngekko-run PRIVATE ${_moderngekko_rt_link})
     endif()
     add_custom_command(TARGET moderngekko-run POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory

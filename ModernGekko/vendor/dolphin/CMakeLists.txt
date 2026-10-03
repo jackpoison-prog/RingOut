@@ -666,6 +666,16 @@ if(NOT (WIN32 AND _M_ARM_64))
   add_definitions(-DHAS_OPENGL)
 endif()
 
+# The D3D11/D3D12 backends are built only under MSVC (they need C++/WinRT; see
+# Source/Core/VideoBackends/CMakeLists.txt). HAS_D3D must be defined HERE, with
+# HAS_VULKAN and HAS_OPENGL: VideoBackendBase.cpp (in VideoCommon) is what
+# registers the backends, and a definition made inside VideoBackends/ never
+# reached it -- every Windows build from 2026-09-05 on shipped without Direct3D,
+# and a request for "D3D" fell back to the first backend in the list.
+if(MSVC)
+  add_definitions(-DHAS_D3D)
+endif()
+
 if(NOT WIN32)
   if(ANDROID)
     set(USE_SYSTEM_Iconv OFF)

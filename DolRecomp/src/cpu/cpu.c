@@ -323,6 +323,36 @@ static u32 exception_msr(u32 old_msr, u32 exception) {
     return next;
 }
 
+#if defined(DOLRECOMP_TWIN_MISS_LOG)
+/* Counts entries a twin fast copy handed to its cold copy (see cpu.h), and at
+ * exit writes "PC hits" lines to $DOLRECOMP_TWIN_MISS_FILE. Called only from
+ * the CPU thread. Open addressing; a full table stops counting new PCs rather
+ * than growing -- a training run misses a few hundred, not thousands. */
+#define DR_TWIN_MISS_SLOTS 65536u
+static u32 dr_twin_miss_pc[DR_TWIN_MISS_SLOTS];
+static unsigned long long dr_twin_miss_hits[DR_TWIN_MISS_SLOTS];
+void dolrecomp_twin_miss(u32 pc) {
+    u32 i = (pc >> 2) * 2654435761u % DR_TWIN_MISS_SLOTS;
+    for (u32 n = 0; n < DR_TWIN_MISS_SLOTS; ++n, i = (i + 1u) % DR_TWIN_MISS_SLOTS) {
+        if (dr_twin_miss_pc[i] == pc) { dr_twin_miss_hits[i]++; return; }
+        if (dr_twin_miss_pc[i] == 0) { dr_twin_miss_pc[i] = pc; dr_twin_miss_hits[i] = 1; return; }
+    }
+}
+/* External linkage on purpose: IR PGO keys a STATIC function as "<source
+ * path>;<name>", and this destructor runs (once) in every --pgo training build,
+ * so a static one put the build machine's path into the shipped profiles. */
+void dolrecomp_twin_miss_report(void);
+__attribute__((destructor)) void dolrecomp_twin_miss_report(void) {
+    const char* path = getenv("DOLRECOMP_TWIN_MISS_FILE");
+    FILE* f = path ? fopen(path, "w") : NULL;
+    if (!f) return;
+    for (u32 i = 0; i < DR_TWIN_MISS_SLOTS; ++i)
+        if (dr_twin_miss_pc[i])
+            fprintf(f, "%08X %llu\n", dr_twin_miss_pc[i], dr_twin_miss_hits[i]);
+    fclose(f);
+}
+#endif
+
 #if defined(DOLRECOMP_RAM_SITE_CHECK)
 /* --ram-bases census (see cpu.h): marked sites that addressed outside RAM. */
 unsigned long long g_dr_ram_site_misses = 0;
@@ -1393,7 +1423,11 @@ bool ppc_fma(CPUState* cpu, f64 a, f64 c, f64 b, bool single,
             if (cpu->fpscr & 0x80u)
                 return false;
         }
-    } else if (isinf(a) || isinf(b) || isinf(c)) {
+    } else if (!isfinite(result) && (isinf(a) || isinf(b) || isinf(c))) {
+        /* An infinite input gives an infinite or NaN result (NaN is the branch
+         * above), and the f32 rounding keeps inf as inf, so a finite result
+         * proves all three inputs finite: test it first, one compare instead of
+         * three on the common path. */
         fma_special = true;
 #if defined(DOLRECOMP_FMA_LAZY)
         ppc_fprf_flush(cpu);

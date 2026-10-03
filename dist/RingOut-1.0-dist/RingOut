@@ -19,7 +19,10 @@ mkdir -p "$USER_DIR"
 # which the game inherits, so it is held exactly as long as the game runs.
 # Taken BEFORE the log below is rotated, so a refused launch cannot clobber the
 # running game's launch.log either.
-if command -v flock >/dev/null 2>&1; then
+# RINGOUT_LOCK_HELD is set below for setup.sh, which runs the game once to build
+# its shader cache: that run is OUR child, and the lock it would wait on is the
+# one this process already holds. Anything else still takes the lock.
+if [ -z "${RINGOUT_LOCK_HELD:-}" ] && command -v flock >/dev/null 2>&1; then
     exec 9>"$USER_DIR/.instance.lock"
     if ! flock -n 9; then
         echo "Ring Out is already running from $HERE -- not starting a second copy." >&2
@@ -35,7 +38,9 @@ fi
 # report starts from. The Deck launcher has kept one for this reason; this one
 # did not. Truncated per run, with the previous kept for comparison, because
 # what matters is the attempt just made and the one before it.
-LOG="$USER_DIR/launch.log"
+# setup.sh's shader warm-up names its own log, so it does not push the last
+# real launch's log out of launch.log.prev.
+LOG="$USER_DIR/${RINGOUT_LOG_NAME:-launch.log}"
 [ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev"
 if [ -t 1 ]; then
     exec > >(tee "$LOG") 2>&1
@@ -158,6 +163,7 @@ if ! have_module || [ ! -d "$HERE/game" ]; then
         exit 1
     fi
 
+    export RINGOUT_LOCK_HELD=1
     # Run setup in a terminal when launched from a desktop icon, so the user can
     # watch it -- recompiling takes several minutes.
     if [ ! -t 1 ] && command -v konsole >/dev/null; then
@@ -172,6 +178,7 @@ if ! have_module || [ ! -d "$HERE/game" ]; then
         report "Setup did not finish. See the messages above."
         exit 1
     fi
+    unset RINGOUT_LOCK_HELD
 fi
 
 GAME_ARGS=""

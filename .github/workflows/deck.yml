@@ -109,9 +109,15 @@ jobs:
       - name: Configure
         # Qt and the tests pull in toolchain the container does not have, and the
         # runtime is headless-capable, so both are off -- same set as build-deck.sh.
+        # LTO: -2.70% of all CPU cycles on the Steam Deck (n=8, same module, frame
+        # hash unchanged); see build-deck.sh. PGO from the committed profile on top
+        # (runtime-pgo-flags.sh): a further -4.51%.
         run: >
+          PGO="$(.github/scripts/runtime-pgo-flags.sh "$PWD/build-deck")" &&
           cmake -S ModernGekko -B build-deck -GNinja
           -DCMAKE_BUILD_TYPE=Release
+          -DENABLE_LTO=ON
+          -DCMAKE_C_FLAGS="$PGO" -DCMAKE_CXX_FLAGS="$PGO" -DCMAKE_EXE_LINKER_FLAGS="$PGO"
           -DENABLE_QT=OFF
           -DENABLE_TESTS=OFF
           -DENABLE_ANALYTICS=OFF

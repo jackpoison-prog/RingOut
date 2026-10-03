@@ -42,6 +42,16 @@ function Get-LatestAsset($repo, $pattern) {
     return $asset.browser_download_url
 }
 
+function Get-TaggedAsset($repo, $tag, $pattern) {
+    # For a dependency whose VERSION matters, where "latest" is a trap.
+    $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/tags/$tag" `
+        -Headers @{ 'User-Agent' = 'ringout-ci'; 'Accept' = 'application/vnd.github+json' }
+    $asset = $rel.assets | Where-Object { $_.name -like $pattern } | Select-Object -First 1
+    if (-not $asset) { throw "no asset matching '$pattern' in $repo release $tag" }
+    Write-Host "  $repo@$tag -> $($asset.name)"
+    return $asset.browser_download_url
+}
+
 function Fetch($url, $file) {
     $path = Join-Path $dl $file
     Write-Host "downloading $file"
@@ -126,12 +136,31 @@ $tc = Join-Path $stage 'toolchain'
 New-Item -ItemType Directory -Force -Path $tc | Out-Null
 
 Write-Host "==> llvm-mingw"
-$llvmUrl = Get-LatestAsset 'mstorsjo/llvm-mingw' '*ucrt-x86_64.zip'
+# PINNED, and it must stay pinned. The player's setup compiles the module with
+# this clang against module-src/profiles/*.profdata, and a profile only applies
+# where the compiler computes the same control-flow hash per function as the
+# clang that trained it. "latest" moved to clang 23 on 2026-08-26 and every
+# Windows package from 1.6.2 on shipped it: the build still said "PGO enabled",
+# but clang 23 discarded the profile for 61 functions including the three
+# hottest chunks (3.8 billion counts; the same chunks under clang 22 -- for Linux
+# or for Windows -- mismatch zero). Found 2026-09-29 by recompiling with
+# -Wbackend-plugin, which the module build silences.
+# 20260616 is LLVM 22.1.8, the exact clang the shipped profiles are trained with.
+# Move this only together with retraining every profile, and keep the check
+# below in step.
+$llvmMingwTag = '20260616'
+$profileClangMajor = 22
+$llvmUrl = Get-TaggedAsset 'mstorsjo/llvm-mingw' $llvmMingwTag '*ucrt-x86_64.zip'
 $llvmZip = Fetch $llvmUrl 'llvm-mingw.zip'
 Expand-Archive $llvmZip -DestinationPath $dl -Force
 $llvmRoot = Get-ChildItem $dl -Directory -Filter 'llvm-mingw-*' | Select-Object -First 1
 if (-not $llvmRoot) { throw "llvm-mingw did not extract as expected" }
 Copy-Item (Join-Path $llvmRoot.FullName '*') $tc -Recurse -Force
+$clangLine = (& (Join-Path $tc 'bin\clang.exe') --version | Select-Object -First 1)
+if ($clangLine -notmatch "clang version $profileClangMajor\.") {
+    throw "bundled clang is '$clangLine' but the profiles need clang $profileClangMajor -- see the pin above"
+}
+Write-Host "  $clangLine (matches the profiles)"
 
 # --- ffmpeg ---------------------------------------------------------------
 # The game's movies are Sofdec (MPEG) inside movie.afs, and the FMV path decodes

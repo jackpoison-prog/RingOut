@@ -449,6 +449,12 @@ case "$DISC_ID" in GRSEAF|GRSEPS|GRSPAF) LEADER_CASES+=(--chunk-overhang 512);; 
 # found no marked access outside RAM. Steam Deck, cycles, both arms retrained:
 # US -0.61%, JP -0.39%, Plus -1.07%, PAL -0.89%; the game's behaviour is unchanged.
 case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES+=(--ram-bases 1,2,13);; esac
+# --fp-check-once (all four discs): every FP instruction tested MSR.FP, 1.43% of
+# a gameplay profile. MSR changes only at mtmsr or at a block boundary, so one
+# test per straight-line run of FP instructions is enough; every entry point
+# still tests. Steam Deck, cycles, both arms retrained, game behaviour unchanged:
+# US -2.61%, JP -2.24%, Plus -0.99%, PAL -2.23%.
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES+=(--fp-check-once);; esac
 # The inline paired-single fast path (module-src CMakeLists MODULE_PSQ_FAST) has
 # the same constraint and the same gate: it changes chunk control flow, so a
 # disc needs a profile trained with it. US, JP and PAL all have one. Every
@@ -467,7 +473,12 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) PSQ_FAST+=(-DMODULE_MEM_FAST=ON)
 # unchanged. A disc without a list builds exactly as before.
 TWIN=()
 if [ -f "$HERE/module-src/profiles/$DISC_ID.hot" ]; then
-    TWIN=(--twin-hot "$HERE/module-src/profiles/$DISC_ID.hot" --twin-regs ratio)
+    # --twin-cr: the fast copy also keeps the CR fields in write-through locals,
+    # so a branch reads its compare's result from a register instead of from
+    # ctx, which every guest store forces clang to reload. Steam Deck, cycles,
+    # both arms retrained, game behaviour unchanged: US -0.69%, JP -0.25%,
+    # Plus -1.20%, PAL -1.75%.
+    TWIN=(--twin-hot "$HERE/module-src/profiles/$DISC_ID.hot" --twin-regs ratio --twin-cr)
 fi
 "$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
     "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(nproc)" "$HERE/work/out"
@@ -499,10 +510,21 @@ echo "==> 3/$NSTAGES  Building the module"
 # counts and inlines blind, producing a bigger, slower module. The 1.34% it
 # still buys comes from the runtime helpers, whose names do not move between
 # regions. So: use the profile for THIS disc, and if there is not one, use none.
+#
+# AND PICKED BY CLANG VERSION. A profile records each function's shape as the
+# compiler saw it, and a newer clang's optimiser reshapes the code before it
+# compares: clang 23 matched only ~1/3 of the chunks of a clang-22 profile and ran
+# the rest unprofiled, silently (2026-10-02, the day Arch moved to 23). So a
+# profile trained on the player's clang major, <ID>.clangNN.profdata, wins; the
+# plain <ID>.profdata is the clang-22 set (also what the Windows package's pinned
+# clang 22 uses). The check after the build reports any mismatch that is left.
 PGO_ARGS=()
 PROFILE=""
+CLANG_MAJOR="$("$CC" -dumpversion 2>/dev/null | cut -d. -f1)"
 if "$CC" --version 2>&1 | grep -qi clang; then
-    if [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
+    if [ -n "$CLANG_MAJOR" ] && [ -f "$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata" ]; then
+        PROFILE="$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata"
+    elif [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
         PROFILE="$HERE/module-src/profiles/$DISC_ID.profdata"
     elif [ "$DISC_ID" = "GRSEPS" ] && [ -f "$HERE/module-src/profiles/GRSEAF.profdata" ]; then
         # SC2 Plus, the community mod. It appends its own code at 0x80476000 and
@@ -569,6 +591,36 @@ elif [ -n "$PROFILE" ] && [ -z "$PGO_WHY" ]; then
     PGO_WHY="this compiler could not use the shipped profile"
 fi
 
+# DOES THE PROFILE STILL FIT? "PGO enabled" only means clang read the file. Whether
+# it matched the code is a warning the build above silences (-Wno-backend-plugin),
+# and a mismatched chunk -- each chunk is about one function -- builds unprofiled
+# without a word. Recompile the three chunks holding the hottest entry points
+# (from the twin hot list) with that warning on, and count. A few seconds.
+PGO_MISMATCH=0
+HOT="$HERE/module-src/profiles/$DISC_ID.hot"
+if [ "$PGO_STATE" = "shipped" ] && [ -f "$HOT" ] && command -v ninja >/dev/null 2>&1; then
+    hot_chunks=()
+    while read -r pc _; do
+        # the chunk holding pc: the last chunk file whose start address is <= pc
+        c="$(ls "$HERE/work/out/generated/chunks" 2>/dev/null |
+             awk -F_ -v pc="$(echo "$pc" | tr A-F a-f)" '{a=tolower($4); sub(/\.c$/,"",a); if (a <= pc) c=$0} END {print c}' || true)"
+        [ -n "$c" ] && hot_chunks+=("${c%.c}")
+    done < <(tr -d '\r' < "$HOT" | sort -k2 -n -r | head -3)
+    for c in $(printf '%s\n' "${hot_chunks[@]}" | sort -u); do
+        cmd="$(cd "$HERE/work/build" && ninja -t commands 2>/dev/null | grep -F "/$c.c.o -c" | head -1 |
+               sed -E 's/ -o \S+/ -o \/dev\/null/; s/ -MD -MT \S+ -MF \S+//' || true)"
+        [ -n "$cmd" ] || continue
+        # grep -c exits 1 on a count of 0, which set -e + pipefail would turn into
+        # an abort of setup itself -- exactly on the GOOD outcome (2026-10-02).
+        n="$(cd "$HERE/work/build" && bash -c "$cmd -Wbackend-plugin" 2>&1 | grep -c 'hash mismatch' || true)"
+        [ "${n:-0}" -gt 0 ] && PGO_MISMATCH=$((PGO_MISMATCH + 1))
+    done
+    if [ "$PGO_MISMATCH" -gt 0 ]; then
+        PGO_STATE="mismatch"
+        PGO_WHY="clang $CLANG_MAJOR reshapes the code before matching it, so $PGO_MISMATCH of the 3 hottest chunks ignore the shipped profile (it was trained on another clang version)"
+    fi
+fi
+
 # --pgo: TRAIN A PROFILE ON THIS MACHINE'S CLANG, then rebuild with it.
 #
 # The profiles that ship are written by LLVM 22, and an indexed profile can only
@@ -607,16 +659,27 @@ if [ "$PGO" = 1 ]; then
     echo "    Measured: ~11 minutes on a desktop, on top of a normal build."
     echo "    A Steam Deck is a good deal slower -- leave it running."
     PROFDIR="$HERE/work/pgo"
-    rm -rf "$PROFDIR" "$HERE/work/build-gen"; mkdir -p "$PROFDIR"
+    # With twin chunks the training build also counts entries the fast copies
+    # hand to their cold copies (DOLRECOMP_TWIN_MISS_LOG, cpu.h): the shipped hot
+    # list can miss hot entry points, silently -- 7-8% of entries on three discs
+    # once a codegen change moved them -- and a profile trained that way learns
+    # the slow path.
+    MISS_DEF=""
+    [ "${#TWIN[@]}" -gt 0 ] && MISS_DEF=" -DDOLRECOMP_TWIN_MISS_LOG"
+
+    # One instrumented build + one training run. A function because a stale hot
+    # list means doing it twice (see below).
+    pgo_train() {
+    rm -rf "$PROFDIR" "$HERE/work/build-gen" "$HERE/work/pgo-twin-miss.txt"; mkdir -p "$PROFDIR"
 
     # MODULE_LTO=OFF is REQUIRED here, not a speed choice: instrumented objects
     # are LTO IR, and mixing them with a non-LTO link silently produces a 21 KB
     # stub that loads and does nothing -- a training run against it would look
     # like it worked and collect nothing.
-    if cmake -S "$HERE/module-src" -B "$HERE/work/build-gen" -GNinja \
+    cmake -S "$HERE/module-src" -B "$HERE/work/build-gen" -GNinja \
              -DCMAKE_BUILD_TYPE=Release \
              -DCMAKE_C_COMPILER="$CC" \
-             -DCMAKE_C_FLAGS="-march=$MARCH -fprofile-generate=$PROFDIR" \
+             -DCMAKE_C_FLAGS="-march=$MARCH -fprofile-generate=$PROFDIR$MISS_DEF" \
              -DCMAKE_SHARED_LINKER_FLAGS="-fprofile-generate=$PROFDIR" \
              -DMODULE_LTO=OFF \
              "${PSQ_FAST[@]}" \
@@ -626,8 +689,8 @@ if [ "$PGO" = 1 ]; then
              -DGXRUNTIME_INC="$DEPS/gxruntime-include" \
              -DCHASSIS_ABI_DIR="$DEPS/chassis-abi" \
              -DMODULE_TEMPLATE="$DEPS/module-template" >"$HERE/work/pgo-gen.log" 2>&1 \
-       && cmake --build "$HERE/work/build-gen" >>"$HERE/work/pgo-gen.log" 2>&1
-    then
+       && cmake --build "$HERE/work/build-gen" >>"$HERE/work/pgo-gen.log" 2>&1 \
+       || return 1
         # 6000 frames of ONE arcade match. Broader training sets were tried
         # twice and both LOST (+2.18% and +1.26%): weight went to code the
         # player does not run. Menus are not a substitute either -- they carry
@@ -644,6 +707,7 @@ if [ "$PGO" = 1 ]; then
         # guest-RAM hash, which is wanted twice over here: it is ~29% of cycles,
         # and profiling it would spend the profile's weight on the harness's
         # crc32 instead of the game.
+        DOLRECOMP_TWIN_MISS_FILE="$HERE/work/pgo-twin-miss.txt" \
         LLVM_PROFILE_FILE="$PROFDIR/%p.profraw" \
         RINGOUT_GX_STATS=1000 \
         RINGOUT_DETERMINISM_LOG="$HERE/work/pgo-frames.log" \
@@ -654,6 +718,39 @@ if [ "$PGO" = 1 ]; then
             --user-dir "$HERE/work/pgo-user" --game "$HERE/game" \
             --module "$HERE/work/build-gen/g${DISC_ID}_recomp.so" \
             >"$HERE/work/pgo-train.log" 2>&1 || true
+
+    return 0
+    }
+
+    if pgo_train
+    then
+        # A STALE HOT LIST: entry PCs the cold copies took at least 1000 times in
+        # 6000 frames. Past 500k such entries (a stale list measured ~15M per 6000
+        # frames; a current one a few thousand), add them to a local copy of the
+        # list, regenerate, and train again, so the profile learns the fast copies.
+        MISS_FILE="$HERE/work/pgo-twin-miss.txt"
+        if [ -n "$MISS_DEF" ] && [ -s "$MISS_FILE" ]; then
+            read -r MISS_PCS MISS_HITS < <(awk '$2 >= 1000 { n++; s += $2 } END { print n + 0, s + 0 }' "$MISS_FILE")
+            if [ "$MISS_HITS" -ge 500000 ]; then
+                echo "    the shipped hot list misses $MISS_PCS entry points ($MISS_HITS entries);"
+                echo "    adding them to a local list and training again ..."
+                { cat "$HERE/module-src/profiles/$DISC_ID.hot"; awk '$2 >= 1000' "$MISS_FILE"; } |
+                    sort -u -k1,1 > "$HERE/work/local.hot"
+                TWIN=(--twin-hot "$HERE/work/local.hot" --twin-regs ratio)
+                if ! { "$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
+                         "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(nproc)" "$HERE/work/out" \
+                         >"$HERE/work/pgo-regen.log" 2>&1 \
+                       && cp "$HERE/game/sys/main.dol" "$HERE/work/out/generated/main.dol" \
+                       && pgo_train; }; then
+                    # The first run's counts were cleared when the second began, so
+                    # there is nothing to merge: the checks below report no counts
+                    # and keep the module already built, which is correct.
+                    echo "    retraining with the refreshed list failed (see work/pgo-regen.log"
+                    echo "    and work/pgo-gen.log); keeping the module you already have."
+                    rm -rf "$PROFDIR"; mkdir -p "$PROFDIR"
+                fi
+            fi
+        fi
 
         # DID THE TRAINING RUN ACTUALLY REACH A FIGHT? A run that parked on a
         # dialog still exits cleanly and still writes a structurally valid
@@ -831,6 +928,50 @@ elif [ "$DECK" = 1 ]; then
     fi
 fi
 
+# SHADER WARM-UP. The first launch compiles Dolphin's ubershaders before the
+# game starts (the runtime forces WaitForShadersBeforeStarting on), and with an
+# empty cache that is a black window for ~2 minutes on a 2-core laptop:
+# 142-154 s to frame 2000 cold against 21 s warm (A4-9125, RADV, n=6 vs n=3,
+# 2026-10-02). Booting the game for 10 frames here builds that cache -- Dolphin's
+# in userdata/Cache and the driver's in ~/.cache -- so the wait happens during
+# setup, where waiting is expected, and the first real launch reached frame 2000
+# in 22.5-22.8 s (n=3). On a desktop it costs a few seconds. Fight speed is the
+# same either way; starting without the wait was tried too and cost the fight
+# 16% on that laptop, because the compile then runs during play.
+#
+# The cache belongs to this machine's GPU driver, so a --deck build skips it:
+# the Deck has to build its own. It goes through ./RingOut rather than the
+# runtime directly, because the launcher is what keeps the bundled libraries
+# from shadowing the host's Mesa -- run bare, a window may get no Vulkan driver.
+# RINGOUT_DETERMINISM_LOG arms the frame limit (see the --pgo stage above);
+# without it the game would just keep running.
+if [ "$DECK" != 1 ] && [ -z "${RINGOUT_NO_SHADER_WARMUP:-}" ]; then
+    echo "==> shaders"
+    if ls "$HERE"/userdata/Cache/Shaders/*-uber-ps-*.cache >/dev/null 2>&1; then
+        echo "    already built - skipped."
+    elif [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+        echo "    no display here - the first launch will build them instead."
+    else
+        echo "    starting the game once to build its shader cache (a few seconds on a"
+        echo "    desktop, ~2 minutes on a slow laptop). A window opens and closes."
+        mkdir -p "$HERE/work"
+        rm -f "$HERE/work/shader-warmup-frames.log"
+        warm_start=$SECONDS
+        RINGOUT_LOG_NAME=shader-warmup.log \
+        RINGOUT_DETERMINISM_LOG="$HERE/work/shader-warmup-frames.log" \
+        RINGOUT_DETERMINISM_NOHASH=1 \
+        RINGOUT_DETERMINISM_FRAMES=10 \
+          timeout 900 "$HERE/RingOut" >/dev/null 2>&1 || true
+        if ls "$HERE"/userdata/Cache/Shaders/*-uber-ps-*.cache >/dev/null 2>&1; then
+            echo "    done in $((SECONDS - warm_start)) s."
+        else
+            # A running copy of the game refuses the launch before any log opens.
+            echo "    did not finish - not a problem, the first launch will build them."
+            echo "    (is Ring Out already running? details, if any: userdata/shader-warmup.log)"
+        fi
+    fi
+fi
+
 # The game's own artwork, taken from the disc you supplied. None of it ships in
 # this package -- it belongs to the publisher, so it is extracted here on your
 # machine, exactly as the module above is. art/banner.png is the disc banner;
@@ -876,6 +1017,23 @@ case "$PGO_STATE" in
   shipped)
     echo "  Profile:  YES -- using the profile that ships for $DISC_ID."
     echo "            Worth 10-14% of CPU time against no profile at all."
+    ;;
+  mismatch)
+    echo "  Profile:  PARTLY -- the shipped profile does not fit your compiler."
+    echo
+    echo "  Why:      $PGO_WHY."
+    echo
+    echo "  Costs:    the unmatched code builds unprofiled. A profile is worth"
+    echo "            10-14% of CPU time; with clang 23 against a clang-22"
+    echo "            profile about two thirds of it was lost. The module is"
+    echo "            still CORRECT and plays identically."
+    if [ "$PGO" != 1 ]; then
+    echo
+    echo "  Fix:      ./setup.sh --pgo $(basename "$ISO")"
+    echo "            Trains a profile with YOUR clang (6000 frames of play) and"
+    echo "            rebuilds with it. ~11 min extra on a desktop, once."
+    echo "            Needs llvm-profdata (Arch: pacman -S llvm)."
+    fi
     ;;
   *)
     echo "  Profile:  NO -- this module is UNPROFILED."

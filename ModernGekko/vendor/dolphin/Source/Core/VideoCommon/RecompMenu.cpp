@@ -6,6 +6,7 @@
 #include "VideoCommon/RecompGameData.h"
 #include "VideoCommon/RecompMods.h"
 
+#include <cstring>
 #include <enet/enet.h>
 
 #include <algorithm>
@@ -33,6 +34,7 @@
 #include <fstream>
 
 #include "Common/Config/Config.h"
+#include "VideoCommon/VideoBackendBase.h"
 #include "Core/NetPlay/NetPlayProto.h"
 #include "Common/FileUtil.h"
 #include "Common/IniFile.h"
@@ -96,6 +98,7 @@ enum class Item
   TrainingHud,
   LensFlares,
   Filter,
+  Renderer,
   Fullscreen,
   // Audio
   Volume,
@@ -189,7 +192,8 @@ const std::vector<Item>& TabItems(Tab tab)
       Item::Widescreen,   Item::InternalRes, Item::AspectRatio,      Item::VSync,
       Item::AntiAliasing, Item::Anisotropy,  Item::TextureFiltering, Item::TexturePacks,
       Item::PrefetchTextures, Item::ShowFPS, Item::FreeCamera,       Item::TrainingHud,
-      Item::LensFlares,       Item::Filter,      Item::Fullscreen,       Item::Apply};
+      Item::LensFlares,       Item::Filter,      Item::Renderer,  Item::Fullscreen,
+      Item::Apply};
   static const std::vector<Item> audio = {Item::Volume, Item::Muted, Item::AudioLatency,
                                           Item::FillGaps, Item::Apply};
   static const std::vector<Item> states = {Item::StateSlot, Item::SaveState, Item::LoadState,
@@ -686,6 +690,50 @@ constexpr float kHudFullHealth = 240.0f;
 
 const Config::Info<bool> RECOMP_TRAINING_HUD{{Config::System::Main, "RecompMenu", "TrainingHud"},
                                              false};
+
+// The renderer the player picked, applied at the NEXT launch: Dolphin sets up
+// its video backend when the game boots and cannot swap it under a running
+// session. dolphin_runtime.cpp reads the same key at startup (and ignores a
+// name this build does not have, e.g. "D3D12" carried over to Linux). Empty =
+// the platform default (Vulkan, or Direct3D 11 on a Windows machine with no
+// working Vulkan driver).
+const Config::Info<std::string> RECOMP_RENDERER{{Config::System::Main, "RecompMenu", "Renderer"},
+                                                ""};
+
+// The renderers this build can offer: everything compiled in except Null (no
+// picture) and the software renderer (a debugging tool, far too slow to play).
+// Windows: D3D11, D3D12, OpenGL, Vulkan. Linux and the Deck: Vulkan only --
+// OpenGL is compiled in there (X11/GLX) but fails to initialise in the shipped
+// runtime ("Failed to initialize video backend!", tested 2026-09-28), and a
+// renderer that cannot start locks the player out of this very menu.
+bool RendererOffered(const std::string& name)
+{
+  if (name == "Null" || name == "Software Renderer")
+    return false;
+#ifndef _WIN32
+  if (name == "OGL")
+    return false;
+#endif
+  return true;
+}
+
+std::vector<const VideoBackendBase*> ChoosableRenderers()
+{
+  std::vector<const VideoBackendBase*> out;
+  for (const auto& backend : VideoBackendBase::GetAvailableBackends())
+    if (RendererOffered(backend->GetConfigName()))
+      out.push_back(backend.get());
+  return out;
+}
+
+// The pending choice, or the renderer this session is running if none is set.
+std::string ChosenRendererName()
+{
+  const std::string chosen = Config::Get(RECOMP_RENDERER);
+  if (!chosen.empty())
+    return chosen;
+  return g_video_backend ? g_video_backend->GetConfigName() : Config::Get(Config::MAIN_GFX_BACKEND);
+}
 // P2's health has no AR-code anchor. 0x8036FABC was proven by differential
 // scan during a real two-sided match: of every f32 in MEM1 at 240.0 at round
 // start, only it and P1's slot ever decreased, and each moved only when its
@@ -952,6 +1000,8 @@ const char* ItemLabel(Item item)
     return "Free Camera";
   case Item::TrainingHud:
     return "Training HUD";
+  case Item::Renderer:
+    return "Renderer";
   case Item::Fullscreen:
     return "Fullscreen";
   case Item::Volume:
@@ -1382,6 +1432,19 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     // rather than lying about it being off.
     return current.empty() ? "Off" : current;
   }
+  case Item::Renderer:
+  {
+    const std::string chosen = ChosenRendererName();
+    std::string label = chosen;
+    for (const VideoBackendBase* backend : ChoosableRenderers())
+      if (backend->GetConfigName() == chosen)
+        label = backend->GetDisplayName();
+    // Changing it cannot take effect until the next launch; say so, rather than
+    // letting the player think the switch did nothing.
+    if (g_video_backend && chosen != g_video_backend->GetConfigName())
+      label += "  (next launch)";
+    return label;
+  }
   case Item::TexturePacks:
     return Config::Get(Config::GFX_HIRES_TEXTURES) ? "ON" : "OFF";
   case Item::PrefetchTextures:
@@ -1792,6 +1855,20 @@ bool AdjustItem(Item item, int direction, State& state)
     index = std::clamp(index + direction, 0, static_cast<int>(kFilters.size()) - 1);
     Config::SetBase(Config::GFX_ENHANCE_POST_SHADER, std::string(kFilters[index].shader));
     break;
+  }
+  case Item::Renderer:
+  {
+    const std::vector<const VideoBackendBase*> renderers = ChoosableRenderers();
+    if (renderers.size() < 2)
+      return false;  // nothing to choose between (Linux/Deck: Vulkan only)
+    const std::string chosen = ChosenRendererName();
+    int index = 0;
+    for (size_t i = 0; i < renderers.size(); ++i)
+      if (renderers[i]->GetConfigName() == chosen)
+        index = static_cast<int>(i);
+    index = std::clamp(index + direction, 0, static_cast<int>(renderers.size()) - 1);
+    Config::SetBase(RECOMP_RENDERER, renderers[index]->GetConfigName());
+    return true;  // saved now, so the choice survives quitting without Apply
   }
   case Item::TexturePacks:
     // Dolphin-format packs, loaded from <userdir>/Load/Textures/GRSEAF/.
@@ -3283,12 +3360,8 @@ void Draw()
   const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
   const ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  // A panel centred on the picture. Width is fixed rather than proportional:
-  // the tab strip is nine entries laid out with SameLine and wrapped at the
-  // old 460, and 560 is what clears it.
   ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.5f), ImGuiCond_Always,
                           ImVec2(0.5f, 0.5f));
-  ImGui::SetNextWindowSize(ImVec2(560.0f * scale, 0.0f), ImGuiCond_Always);
 
   // Dressed to sit beside the game's own panels rather than on top of them:
   // the blue gradient and white edge are the shape Soulcalibur II uses for its
@@ -3305,6 +3378,19 @@ void Draw()
   ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
   ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * scale, 14.0f));
+
+  // A panel centred on the picture, exactly as wide as the tab strip: nine
+  // entries laid out with SameLine below, measured in the bold face they are
+  // drawn in (hence after PushFont). A fixed width either wrapped the strip or
+  // left a band of empty panel past its end, depending on the font size.
+  {
+    const ImGuiStyle& style = ImGui::GetStyle();
+    float strip = style.ItemSpacing.x * (kTabCount - 1);
+    for (int i = 0; i < kTabCount; ++i)
+      strip += ImGui::CalcTextSize((std::string(" ") + TabName(static_cast<Tab>(i)) + " ").c_str()).x;
+    ImGui::SetNextWindowSize(ImVec2(std::ceil(strip + style.WindowPadding.x * 2.0f), 0.0f),
+                             ImGuiCond_Always);
+  }
 
   if (ImGui::Begin("##recomp_menu", nullptr,
                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs |
@@ -3728,8 +3814,38 @@ void PollMenuGamepad()
   // separately below because it needs a hold, not an edge, and so keeps its own
   // state. The spare slot is left rather than renumbering B's index.
   static bool held[std::size(kBindings) + 2] = {};
+
+  // RESOLVED ONCE PER DEVICE, NOT PER TICK. This runs every host-loop tick,
+  // menu open or not, and FindInput is a linear scan that builds every input's
+  // name as a string to compare -- nine scans a tick. On a keyboard (the menu
+  // device on a desktop with no pad) none of these names exist, so each scan
+  // walked every key for nothing: ~2% of the whole process in windowed play
+  // (perf, 2026-09-30: HostTick -> IsMatchingName -> XInput2 Key::GetName).
+  // Devices are immutable once created and hot-plug replaces the object, so a
+  // pointer change is the whole invalidation; holding the shared_ptr keeps the
+  // cached inputs alive until then.
+  static constexpr const char* kInputNames[] = {"Pad N",    "Pad S",    "Pad W", "Pad E",
+                                                "Button S", "Button E", "Button W", "Back",
+                                                "Guide"};
+  static std::shared_ptr<ciface::Core::Device> cached_device;
+  static const ciface::Core::Device::Input* cached_inputs[std::size(kInputNames)] = {};
+  if (cached_device != device)
+  {
+    cached_device = device;
+    for (std::size_t i = 0; i < std::size(kInputNames); ++i)
+      cached_inputs[i] = device->FindInput(kInputNames[i]);
+  }
+  const auto find_input = [&](const char* name) -> const ciface::Core::Device::Input* {
+    for (std::size_t i = 0; i < std::size(kInputNames); ++i)
+    {
+      if (std::strcmp(kInputNames[i], name) == 0)
+        return cached_inputs[i];
+    }
+    return device->FindInput(name);  // a name outside the table: look it up
+  };
+
   const auto pressed = [&](const char* name, bool* was_held) {
-    const auto* const input = device->FindInput(name);
+    const auto* const input = find_input(name);
     const bool down = input != nullptr && input->GetState() > 0.5;
     const bool edge = down && !*was_held;
     *was_held = down;
@@ -3752,7 +3868,7 @@ void PollMenuGamepad()
     using Clock = std::chrono::steady_clock;
     constexpr auto kHoldToOpen = std::chrono::milliseconds(500);
 
-    const auto* const back = device->FindInput("Back");
+    const auto* const back = find_input("Back");
     const bool down = back != nullptr && back->GetState() > 0.5;
 
     static bool was_down = false;

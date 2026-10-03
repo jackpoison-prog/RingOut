@@ -197,6 +197,23 @@ static bool s_preserve_none = false;
 void emit_set_preserve_none(bool enable) { s_preserve_none = enable; }
 bool emit_preserve_none_enabled(void) { return s_preserve_none; }
 const char* emit_chunk_cc(void) { return s_preserve_none ? "DOLRECOMP_CHUNK_FN " : ""; }
+
+/* --fp-check-once: every FP instruction tests MSR.FP (ppc_fp_available) --
+ * 175,848 sites on the US disc, 1.43% of a gameplay profile -- but MSR only
+ * changes at mtmsr, or across something that ends the block (sc, rfi, a call,
+ * a fallback, an exception, which all leave the chunk or reach a leader). So
+ * within a straight-line run, once one FP instruction has passed the test the
+ * rest cannot fail it.
+ *
+ * Every FP instruction is also a switch case (is_extra_entry: after an
+ * FP-unavailable exception the OS resumes AT it), so the test cannot simply be
+ * dropped: label_X keeps it for every entry, and straight-line code that has
+ * already tested jumps past it to fpok_X. Known-enabled resets at each leader,
+ * at every other entry (a mid-block switch case), and after mtmsr. */
+static bool s_fp_check_once = false;
+static DR_THREAD_LOCAL bool s_fp_ok = false;          /* MSR.FP tested in this run */
+static DR_THREAD_LOCAL u32 s_fp_skip_label = 0;       /* emit fpok_<pc> after the test */
+void emit_set_fp_check_once(bool enable) { s_fp_check_once = enable; }
 void emit_set_ram_bases(u32 mask) { s_ram_bases = mask; }
 
 static void emit_ea_open(FILE* out, u8 ra, bool update) {
@@ -1241,6 +1258,8 @@ static void emit_instruction_with_range(FILE* out, const PPCInst* inst,
         } else {
             fprintf(out, "    if (!ppc_fp_available(ctx, 0x%08Xu)) DOLRECOMP_RETURN;\n", inst->address);
         }
+        if (s_fp_skip_label == inst->address)
+            fprintf(out, "fpok_%08X:\n", inst->address);
     }
 
     switch (inst->op) {
@@ -3067,7 +3086,20 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 own, u32 func
         fprintf(out, "    default: DOLRECOMP_RETURN;\n");
     fprintf(out, "    }\n");
 
+    s_fp_ok = false;
     for (i = 0; i < count; i++) {
+        const bool fp_inst = !insts[i].embedded_data && ppc_op_uses_fpu(insts[i].op);
+        /* Any entry resets it, not only leaders: under --direct-calls a return
+           point or a cross-chunk target mid-block is a switch case too, and the
+           code arriving there may have run with FP turned off (a thread switch
+           in between). An FP op's own entry is label_X, which still tests. */
+        if (leader[i] || (!fp_inst && is_extra_entry(&insts[i])))
+            s_fp_ok = false;
+        s_fp_skip_label = 0;
+        if (s_fp_check_once && fp_inst && s_fp_ok) {
+            fprintf(out, "    goto fpok_%08X;\n", insts[i].address);
+            s_fp_skip_label = insts[i].address;
+        }
         fprintf(out, "label_%08X:\n", insts[i].address);
         // ctx->pc only has to be live where it is actually read: block entry
         // (the dispatch switch + lockstep check use the leader address, which
@@ -3089,7 +3121,12 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 own, u32 func
            but a wrong answer here is a silent divergence, not a crash. */
         s_ca_dead_here = (s_ca_elide && ca_live && !ca_live[i]) ? 1 : 0;
         emit_instruction_with_range(out, &insts[i], func_addr, func_end);
+        if (fp_inst)
+            s_fp_ok = true;
+        if (insts[i].op == PPC_OP_MTMSR)
+            s_fp_ok = false;
     }
+    s_fp_skip_label = 0;
     s_block_suffix = 0;
     s_ca_dead_here = 0;
 
