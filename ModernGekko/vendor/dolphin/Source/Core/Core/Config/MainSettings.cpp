@@ -288,7 +288,9 @@ const Info<std::string> MAIN_WII_NUS_SHOP_URL{{System::Main, "Core", "WiiNusShop
 
 const Info<std::string> MAIN_FULLSCREEN_DISPLAY_RES{
     {System::Main, "Display", "FullscreenDisplayRes"}, "Auto"};
-const Info<bool> MAIN_FULLSCREEN{{System::Main, "Display", "Fullscreen"}, false};
+// Ring Out opens fullscreen unless the player turns it off (menu: VIDEO ->
+// Fullscreen at Launch, RingOut#15). Upstream defaults to windowed.
+const Info<bool> MAIN_FULLSCREEN{{System::Main, "Display", "Fullscreen"}, true};
 const Info<bool> MAIN_RENDER_TO_MAIN{{System::Main, "Display", "RenderToMain"}, false};
 const Info<int> MAIN_RENDER_WINDOW_XPOS{{System::Main, "Display", "RenderWindowXPos"}, -1};
 const Info<int> MAIN_RENDER_WINDOW_YPOS{{System::Main, "Display", "RenderWindowYPos"}, -1};

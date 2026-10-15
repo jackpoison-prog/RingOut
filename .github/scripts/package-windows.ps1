@@ -32,10 +32,17 @@ $stage = Join-Path $OutDir "RingOut-$Version"
 $dl    = Join-Path $OutDir '_dl'
 New-Item -ItemType Directory -Force -Path $stage, $dl | Out-Null
 
+# The release lookups below go through the GitHub API. Anonymous calls get 60 an
+# hour per IP, and a hosted runner's IP is shared with other people's jobs: the
+# 1.6.8.1 publish failed right here on "API rate limit exceeded". With the
+# workflow's token the limit is the repository's own and far higher. Without one
+# (a local run) the calls stay anonymous, as before.
+$ApiHeaders = @{ 'User-Agent' = 'ringout-ci'; 'Accept' = 'application/vnd.github+json' }
+if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
+
 function Get-LatestAsset($repo, $pattern) {
     # Pinning tags rots; asking the API for the current release does not.
-    $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" `
-        -Headers @{ 'User-Agent' = 'ringout-ci'; 'Accept' = 'application/vnd.github+json' }
+    $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest" -Headers $ApiHeaders
     $asset = $rel.assets | Where-Object { $_.name -like $pattern } | Select-Object -First 1
     if (-not $asset) { throw "no asset matching '$pattern' in latest release of $repo" }
     Write-Host "  $repo -> $($asset.name)"
@@ -44,8 +51,7 @@ function Get-LatestAsset($repo, $pattern) {
 
 function Get-TaggedAsset($repo, $tag, $pattern) {
     # For a dependency whose VERSION matters, where "latest" is a trap.
-    $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/tags/$tag" `
-        -Headers @{ 'User-Agent' = 'ringout-ci'; 'Accept' = 'application/vnd.github+json' }
+    $rel = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/tags/$tag" -Headers $ApiHeaders
     $asset = $rel.assets | Where-Object { $_.name -like $pattern } | Select-Object -First 1
     if (-not $asset) { throw "no asset matching '$pattern' in $repo release $tag" }
     Write-Host "  $repo@$tag -> $($asset.name)"

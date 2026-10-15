@@ -249,6 +249,8 @@ if ($DiscId -in @('GRSEAF', 'GRSJAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('
 # All four discs, as in setup.sh: leaf functions inlined at native call sites, two-lane vectors in the skin
 # loops, direct paired-single loads and stores in the native regions.
 if ($DiscId -in @('GRSEAF', 'GRSJAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('--inline-leaves', '32', '--skin-simd', '--region-psq') }
+# US only so far, as in setup.sh: two-lane paired-single vectors in the native regions.
+if ($DiscId -eq 'GRSEAF') { $LeaderCases += @('--region-simd') }
 # Twin chunks, as in setup.sh: a fast copy of each chunk entered only at the
 # entry PCs a training run used (the list ships beside the profile), the
 # ordinary chunk as a cold fallback. A disc without a list builds as before.

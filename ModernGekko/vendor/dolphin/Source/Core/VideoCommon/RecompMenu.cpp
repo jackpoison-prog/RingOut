@@ -51,6 +51,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
 #include "Core/HW/ProcessorInterface.h"
+#include "Core/Host.h"
 #include "Core/FreeLookManager.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/Memmap.h"
@@ -100,6 +101,7 @@ enum class Item
   Filter,
   Renderer,
   Fullscreen,
+  FullscreenAtLaunch,
   // Audio
   Volume,
   Muted,
@@ -194,7 +196,7 @@ const std::vector<Item>& TabItems(Tab tab)
       Item::AntiAliasing, Item::Anisotropy,  Item::TextureFiltering, Item::TexturePacks,
       Item::PrefetchTextures, Item::ShowFPS, Item::FreeCamera,       Item::TrainingHud,
       Item::LensFlares,       Item::Filter,      Item::Renderer,  Item::Fullscreen,
-      Item::Apply};
+      Item::FullscreenAtLaunch, Item::Apply};
   static const std::vector<Item> audio = {Item::Volume, Item::Muted, Item::AudioLatency,
                                           Item::FillGaps, Item::Apply};
   static const std::vector<Item> states = {Item::StateSlot, Item::SaveState, Item::LoadState,
@@ -503,6 +505,9 @@ struct State
   // Result of the last restore request, shown in place of the hint line so the
   // player finds out whether it took without leaving the menu.
   std::string mod_message;
+  // Until when the hint line says the settings were saved: Apply's only visible
+  // result, since every setting already took effect as it was changed.
+  std::chrono::steady_clock::time_point applied_until{};
 };
 
 State s_state;
@@ -1005,6 +1010,8 @@ const char* ItemLabel(Item item)
     return "Renderer";
   case Item::Fullscreen:
     return "Fullscreen";
+  case Item::FullscreenAtLaunch:
+    return "Fullscreen at Launch";
   case Item::Volume:
     return "Volume";
   case Item::Muted:
@@ -1454,6 +1461,12 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     return Config::Get(Config::GFX_CACHE_HIRES_TEXTURES) ? "ON" : "OFF";
   case Item::ShowFPS:
     return Config::Get(Config::GFX_SHOW_FPS) ? "ON" : "OFF";
+  case Item::Fullscreen:
+    // The window as it is now (Alt+Enter switches it too). Fullscreen at Launch
+    // below is the saved setting.
+    return Host_RendererIsFullscreen() ? "ON" : "OFF";
+  case Item::FullscreenAtLaunch:
+    return Config::Get(Config::MAIN_FULLSCREEN) ? "ON" : "OFF";
   case Item::FreeCamera:
     return Config::Get(Config::FREE_LOOK_ENABLED) ? "ON" : "OFF";
   case Item::TrainingHud:
@@ -1894,6 +1907,12 @@ bool AdjustItem(Item item, int direction, State& state)
   case Item::ShowFPS:
     Config::SetBase(Config::GFX_SHOW_FPS, !Config::Get(Config::GFX_SHOW_FPS));
     break;
+  case Item::FullscreenAtLaunch:
+    // RingOut#15: every platform opens the window fullscreen when this is set
+    // (default ON, MainSettings.cpp). It does not switch the window now; the
+    // Fullscreen row above does that.
+    Config::SetBase(Config::MAIN_FULLSCREEN, !Config::Get(Config::MAIN_FULLSCREEN));
+    break;
   case Item::FreeCamera:
     Config::SetBase(Config::FREE_LOOK_ENABLED, !Config::Get(Config::FREE_LOOK_ENABLED));
     break;
@@ -2078,6 +2097,7 @@ Action DecideAction(Item item, State& state, bool* needs_config_save)
     // Settings already take effect as they are changed; this flushes them to
     // disk and gives an explicit confirm step.
     *needs_config_save = true;
+    state.applied_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     return Action::None;
   default:
     // Enter deliberately does NOT cycle values -- Left/Right do that. Enter used
@@ -2488,7 +2508,12 @@ void OnKey(Key key)
         else if (s_state.tab != Tab::Cheats)
         {
           const auto& items = TabItems(s_state.tab);
-          if (index < static_cast<int>(items.size()))
+          // Fullscreen is an ON/OFF row like its neighbours, so the arrows switch
+          // it too -- through the action, because a window operation runs after
+          // the menu mutex is released, as Enter's does.
+          if (index < static_cast<int>(items.size()) && items[index] == Item::Fullscreen)
+            action = Action::Fullscreen;
+          else if (index < static_cast<int>(items.size()))
             needs_config_save = AdjustItem(items[index], dir, s_state);
         }
         break;
@@ -3200,6 +3225,7 @@ void Draw()
   int shot_armed = -1;
   bool delete_armed_here = false;
   std::string mod_message;
+  bool applied_now = false;
   // label, value, highlight-value-green
   std::vector<std::tuple<std::string, std::string, bool>> rows;
 
@@ -3216,6 +3242,7 @@ void Draw()
         s_state.delete_armed >= 0 && s_state.delete_armed_tab == s_state.tab &&
         s_state.delete_armed == s_state.selected - 1;
     editing_address = s_state.netplay_addr_octet >= 0;
+    applied_now = std::chrono::steady_clock::now() < s_state.applied_until;
 
     switch (tab)
     {
@@ -3378,9 +3405,6 @@ void Draw()
   const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
   const ImVec2 display = ImGui::GetIO().DisplaySize;
 
-  ImGui::SetNextWindowPos(ImVec2(display.x * 0.5f, display.y * 0.5f), ImGuiCond_Always,
-                          ImVec2(0.5f, 0.5f));
-
   // Dressed to sit beside the game's own panels rather than on top of them:
   // the blue gradient and white edge are the shape Soulcalibur II uses for its
   // save and option dialogs. ImGui cannot gradient-fill a window background, so
@@ -3397,25 +3421,61 @@ void Draw()
   ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(1.0f, 1.0f, 1.0f, 0.35f));
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * scale, 14.0f));
 
-  // A panel centred on the picture, exactly as wide as the tab strip: nine
-  // entries laid out with SameLine below, measured in the bold face they are
-  // drawn in (hence after PushFont). A fixed width either wrapped the strip or
-  // left a band of empty panel past its end, depending on the font size.
+  // A panel exactly as wide as the tab strip: nine entries laid out with
+  // SameLine below, measured in the bold face they are drawn in (hence after
+  // PushFont). A fixed width either wrapped the strip or left a band of empty
+  // panel past its end, depending on the font size.
+  //
+  // Its TOP EDGE STAYS PUT and only the bottom moves. Centring it made both
+  // edges jump whenever a tab changed the row count. The top is where a full
+  // list -- 14 rows, the most any list tab shows before it scrolls -- would sit
+  // centred, and a shorter tab hangs from the same line; only content taller
+  // than the screen leaves room for lifts it. The height eases toward the
+  // content's (measured at the end of the previous frame) instead of jumping,
+  // and the window is sized to the eased height, so rows not uncovered yet are
+  // clipped rather than drawn past the frame. PumpFrame repaints at ~60 Hz.
+  static float s_panel_target = 0.0f;  // the content's height, last frame
+  static float s_panel_height = 0.0f;  // the drawn height, easing toward it
+  static std::chrono::steady_clock::time_point s_panel_time{};
   {
     const ImGuiStyle& style = ImGui::GetStyle();
     float strip = style.ItemSpacing.x * (kTabCount - 1);
     for (int i = 0; i < kTabCount; ++i)
       strip += ImGui::CalcTextSize((std::string(" ") + TabName(static_cast<Tab>(i)) + " ").c_str()).x;
-    ImGui::SetNextWindowSize(ImVec2(std::ceil(strip + style.WindowPadding.x * 2.0f), 0.0f),
-                             ImGuiCond_Always);
+
+    const float margin = 12.0f * scale;
+    const float reference =
+        (14.0f + 7.0f) * ImGui::GetTextLineHeightWithSpacing() + style.WindowPadding.y * 2.0f;
+    float top = std::max(margin, (display.y - reference) * 0.5f);
+    if (s_panel_target > display.y - margin - top)
+      top = std::max(margin, display.y - margin - s_panel_target);
+
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::chrono::duration<float>(now - s_panel_time).count();
+    s_panel_time = now;
+    if (dt > 0.25f || s_panel_height <= 0.0f)
+      s_panel_height = s_panel_target;  // just opened: start at full size, not from nothing
+    else
+      s_panel_height += (s_panel_target - s_panel_height) * (1.0f - std::exp(-dt * 18.0f));
+    if (std::abs(s_panel_target - s_panel_height) < 0.5f)
+      s_panel_height = s_panel_target;
+
+    // Whole pixels only. Centring an odd width put the panel at x.5, and the
+    // eased height is fractional; either way the 4-pixel border straddled a
+    // pixel boundary and some rows drew it a pixel wider -- stray white pixels
+    // down the edges.
+    const float width = std::ceil(strip + style.WindowPadding.x * 2.0f);
+    ImGui::SetNextWindowPos(ImVec2(std::floor((display.x - width) * 0.5f), std::floor(top)),
+                            ImGuiCond_Always);
+    // A zero height (the very first frame) makes ImGui fit the content once.
+    ImGui::SetNextWindowSize(ImVec2(width, std::round(s_panel_height)), ImGuiCond_Always);
   }
 
   if (ImGui::Begin("##recomp_menu", nullptr,
                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs |
                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar |
-                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize |
-                       ImGuiWindowFlags_NoFocusOnAppearing))
+                       ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing))
   {
     // Split so the panel can be painted UNDER content that has not been laid
     // out yet. The window auto-resizes vertically, so its height is not known
@@ -3627,14 +3687,22 @@ void Draw()
       hint = "Game data is modified -- restore it in MODS to play online.";
     if (tab == Tab::Mods && !mod_message.empty())
       hint = mod_message.c_str();
-    ImGui::TextColored(ImVec4(0.80f, 0.86f, 0.95f, 1.0f), "%s", hint);
+    if (applied_now)
+      hint = "Settings saved.";
+    ImGui::TextColored(applied_now ? ImVec4(0.55f, 0.95f, 0.55f, 1.0f) : ImVec4(0.80f, 0.86f, 0.95f, 1.0f),
+                       "%s", hint);
 
     // The panel itself, now that the content below it has fixed the height.
     // Measured from the cursor rather than from GetWindowSize(), which reports
     // an auto-resized window's size one frame late.
     const ImVec2 panel_min = ImGui::GetWindowPos();
+    const float content_bottom = ImGui::GetCursorScreenPos().y + ImGui::GetStyle().WindowPadding.y;
+    s_panel_target = content_bottom - panel_min.y;
+    // The eased height, not the content's: the bottom edge is the one that
+    // moves. The very first frame, with no height yet, uses the content.
     const ImVec2 panel_max(panel_min.x + ImGui::GetWindowSize().x,
-                           ImGui::GetCursorScreenPos().y + ImGui::GetStyle().WindowPadding.y);
+                           s_panel_height > 0.0f ? panel_min.y + std::round(s_panel_height) :
+                                                   std::round(content_bottom));
     frame_dl->ChannelsSetCurrent(0);
     // Lighter at the top, deepening downwards. Opaque enough to read against a
     // bright stage and still let the match show through.
@@ -3648,15 +3716,24 @@ void Draw()
     // path, so a border sitting exactly on the edge loses its outer half --
     // which once left the right and bottom sides with no line at all while the
     // top and left looked perfectly correct.
+    //
+    // Each edge is a FILLED rectangle, not a stroked one. AddRect strokes thick
+    // lines from a strip baked into the font atlas, and the glyphs beside that
+    // strip bled into it: stray white fragments down the left edge (and along
+    // the bottom once the panel had whole-pixel edges). Filled rectangles
+    // sample the atlas's single white texel and have whole-pixel edges here.
+    const auto frame = [frame_dl](ImVec2 a, ImVec2 b, float t, ImU32 col) {
+      frame_dl->AddRectFilled(a, ImVec2(b.x, a.y + t), col);                       // top
+      frame_dl->AddRectFilled(ImVec2(a.x, b.y - t), b, col);                       // bottom
+      frame_dl->AddRectFilled(ImVec2(a.x, a.y + t), ImVec2(a.x + t, b.y - t), col);  // left
+      frame_dl->AddRectFilled(ImVec2(b.x - t, a.y + t), ImVec2(b.x, b.y - t), col);  // right
+    };
     const float rule = 4.0f;
-    frame_dl->AddRect(ImVec2(panel_min.x + rule * 0.5f, panel_min.y + rule * 0.5f),
-                      ImVec2(panel_max.x - rule * 0.5f, panel_max.y - rule * 0.5f),
-                      IM_COL32(255, 255, 255, 245), 0.0f, 0, rule);
+    frame(panel_min, panel_max, rule, IM_COL32(255, 255, 255, 245));
     // A dimmer companion just inside, which stops a heavy rule reading as a
     // stuck row of pixels.
-    frame_dl->AddRect(ImVec2(panel_min.x + rule + 2.0f, panel_min.y + rule + 2.0f),
-                      ImVec2(panel_max.x - rule - 2.0f, panel_max.y - rule - 2.0f),
-                      IM_COL32(255, 255, 255, 70), 0.0f, 0, 1.0f);
+    frame(ImVec2(panel_min.x + rule + 2.0f, panel_min.y + rule + 2.0f),
+          ImVec2(panel_max.x - rule - 2.0f, panel_max.y - rule - 2.0f), 1.0f, IM_COL32(255, 255, 255, 70));
     frame_dl->ChannelsMerge();
   }
   ImGui::End();

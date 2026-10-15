@@ -504,6 +504,12 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS|GRSPAF) LEADER_CASES+=(--function-overha
 # straight between guest RAM and the region's locals instead of through the CPU
 # state, whenever the recompiled code's own fast path would apply: -1.51% on top.
 case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS|GRSPAF) LEADER_CASES+=(--inline-leaves 32 --skin-simd --region-psq);; esac
+# --region-simd (US only so far, 2026-10-15): in the native regions with at least
+# 8 paired-single ops, each paired-single register is one two-lane vector and
+# the ops that have a two-lane form with the same arithmetic run as one vector
+# op. Frame hashes identical; Steam Deck, both arms retrained: -0.98% and
+# -1.17% cycles in two rounds.
+case "$DISC_ID" in GRSEAF) LEADER_CASES+=(--region-simd);; esac
 # The inline paired-single fast path (module-src CMakeLists MODULE_PSQ_FAST) has
 # the same constraint and the same gate: it changes chunk control flow, so a
 # disc needs a profile trained with it. US, JP and PAL all have one. Every

@@ -243,6 +243,9 @@ jobs:
         # Always on a manual run, publish or not: this is the only way
         # package-windows.ps1 ever gets exercised.
         if: github.event_name == 'workflow_dispatch' && steps.pgo.outputs.mode != 'instrument'
+        env:
+          # read-only use: the script's release lookups (see $ApiHeaders there)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
           .github/scripts/package-windows.ps1 `

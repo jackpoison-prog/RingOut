@@ -409,6 +409,7 @@ typedef struct {
     Lines orig;   /* as written by the emitter (callee bodies are copied from here) */
     Lines work;   /* with this pass's blocks inserted; empty until the first region in the file */
     bool loaded, patched;
+    bool simd;    /* --region-simd vectorised a region here: the file gets kSimdPrelude */
 } Chunk;
 static Chunk* s_chunks = NULL;
 static size_t s_chunk_n = 0;
@@ -1069,6 +1070,293 @@ static const char kPsqHelpers[] =
     "#endif\n"
     "/* ---- end --region-psq helpers ---- */\n";
 
+/* ---- --region-simd: two-lane paired singles inside native regions ----
+ * In a region with at least kSimdMinOps paired-single ops, each FP local pair (f64 nFk, nPk) becomes ONE vector nVk
+ * and the scalar names become lane macros (#define nFk (nVk[0])), so every line left alone keeps its exact per-lane
+ * meaning. Then the op pairs that have a two-lane form with the SAME arithmetic become one vector statement: the
+ * rounded ps_add/sub/mul/div forms, ps_mul with force25, the ps_madd family (still two statements, so nothing can be
+ * contracted into an FMA), ps_muls0/1, ps_madds0/1, ps_sel, ps_mr, ps_merge00..11, and the direct psq_l (into
+ * temporaries: a vector lane has no address). Everything else (ps_sum0/1, ps_neg/abs, compares, scalar FP, FPRF,
+ * exits) stays as it was, through the lane macros. The module builds with -ffp-contract=off and packed conversions
+ * obey the same MXCSR, so the lanes are bit-identical: the US frame hashes do not move. Measured on the Steam Deck
+ * (US, both arms PGO-retrained, same work, n=8 twice): -0.98% and -1.17% cycles. A rewrite of each finished region
+ * block, byte-identical to the measured prototype (regsimd.py --min 8). */
+static bool s_region_simd = false;
+void native_regions_set_simd(bool on) { s_region_simd = on; }
+enum { kSimdMinOps = 8 };
+static unsigned s_simd_regions, s_simd_pairs, s_simd_madd, s_simd_s01, s_simd_psql;
+
+static const char kSimdPrelude[] =
+    "/* ---- --region-simd: two-lane paired singles in native regions (native_regions.c) ---- */\n"
+    "typedef double nrv_v2d __attribute__((vector_size(16)));\n"
+    "typedef float nrv_v2f __attribute__((vector_size(8)));\n"
+    "typedef u64 nrv_v2u __attribute__((vector_size(16)));\n"
+    "typedef s32 nrv_v2i __attribute__((vector_size(8)));\n"
+    "typedef long long nrv_v2l __attribute__((vector_size(16)));\n"
+    "NREG_FN nrv_v2f nrv_f(nrv_v2d a) { return __builtin_convertvector(a, nrv_v2f); }\n"
+    "NREG_FN nrv_v2d nrv_d(nrv_v2f a) { return __builtin_convertvector(a, nrv_v2d); }\n"
+    "NREG_FN nrv_v2d nrv_round(nrv_v2d a) { return nrv_d(nrv_f(a)); }\n"
+    "NREG_FN nrv_v2d nrv_force25(nrv_v2d a) {\n"
+    "    nrv_v2u b = (nrv_v2u)a;\n"
+    "    return (nrv_v2d)((b & 0xFFFFFFFFF8000000ull) + (b & 0x0000000008000000ull));\n"
+    "}\n"
+    "NREG_FN nrv_v2d nrv_sel(nrv_v2d a, nrv_v2d c, nrv_v2d b) {   /* per lane: (f32)a >= 0 ? c : b */\n"
+    "    nrv_v2l m = __builtin_convertvector(nrv_f(a) >= 0.0f, nrv_v2l);\n"
+    "    return (nrv_v2d)(((nrv_v2u)c & (nrv_v2u)m) | ((nrv_v2u)b & ~(nrv_v2u)m));\n"
+    "}\n"
+    "#define NRV_S0(v) __builtin_shufflevector((v), (v), 0, 0)\n"
+    "#define NRV_S1(v) __builtin_shufflevector((v), (v), 1, 1)\n"
+    "/* ---- end --region-simd ---- */\n";
+
+/* Match at s: literal bytes, except \1 = indentation (spaces/tabs, possibly none; its length into *ind), \2 = a decimal
+ * number (into n[] in order), \3 = one of - + * / and \4 = F or P (both into c[] in order). The end of the match, or
+ * NULL. Pattern literals must not put an octal digit right after an escape. */
+static const char* pmatch_at(const char* s, const char* pat, size_t* ind, unsigned* n, char* c) {
+    unsigned kn = 0, kc = 0;
+    for (const char* p = pat; *p; p++) {
+        if (*p == '\1') {
+            const char* t = s;
+            while (*s == ' ' || *s == '\t') s++;
+            if (ind) *ind = (size_t)(s - t);
+        } else if (*p == '\2') {
+            if (!is_digit(*s)) return NULL;
+            unsigned v = 0;
+            while (is_digit(*s)) v = v * 10u + (unsigned)(*s++ - '0');
+            n[kn++] = v;
+        } else if (*p == '\3' || *p == '\4') {
+            if (!*s || !strchr(*p == '\3' ? "-+*/" : "FP", *s)) return NULL;
+            c[kc++] = *s++;
+        } else if (*s != *p) {
+            return NULL;
+        } else {
+            s++;
+        }
+    }
+    return s;
+}
+/* the same, for the whole line */
+static bool pmatch(const char* l, const char* pat, size_t* ind, unsigned* n, char* c) {
+    const char* e = pmatch_at(l, pat, ind, n, c);
+    return e && !*e;
+}
+static bool line_is(const char* l, const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return k > 0 && (size_t)k < sizeof(buf) && strcmp(l, buf) == 0;
+}
+static bool strip_is(const char* l, const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return k > 0 && (size_t)k < sizeof(buf) && strip_eq(l, buf);
+}
+static void push_fmt(Lines* L, const char* fmt, ...) {
+    Str o = {0};
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    str_puts(&o, buf);
+    lines_push(L, str_take(&o));
+}
+
+/* `<ws>// XXXXXXXX: ps_` */
+static bool is_ps_op(const char* l) {
+    const char* s = lskip(l);
+    if (!starts(s, "// ")) return false;
+    for (int i = 3; i < 11; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'A' && s[i] <= 'F'))) return false;
+    return starts(s + 11, ": ps_");
+}
+/* "f64 nFk = ctx->fpr[k], nPk = ctx->ps1[k];" at p (after a non-word character): its end, and k when all four agree */
+static const char* fp_decl_at(const char* l, const char* p, unsigned* k, bool* same) {
+    if (p > l && is_word(p[-1])) return NULL;
+    unsigned n[4];
+    const char* e = pmatch_at(p, "f64 nF\2 = ctx->fpr[\2], nP\2 = ctx->ps1[\2];", NULL, n, NULL);
+    if (!e) return NULL;
+    *k = n[0];
+    *same = n[1] == n[0] && n[2] == n[0] && n[3] == n[0];
+    return e;
+}
+
+/* ps_madd/msub/nmadd/nmsub: the scalar code's two-lane statement group at L[i] -> lines consumed (0 = not one) */
+static size_t simd_madd(char** L, size_t n, size_t i, Lines* out) {
+    size_t ind;
+    unsigned v[2], b[1], d[1];
+    char op[1];
+    if (i + 5 >= n || !pmatch(L[i], "\1f32 ps0 = (f32)nF\2 * (f32)nF\2;", &ind, v, NULL)) return 0;
+    if (!strip_is(L[i + 1], "f32 ps1 = (f32)nP%u * (f32)nP%u;", v[0], v[1])) return 0;
+    if (!pmatch(L[i + 2], "\1ps0 \3= (f32)nF\2;", NULL, b, op) || (op[0] != '-' && op[0] != '+')) return 0;
+    if (!strip_is(L[i + 3], "ps1 %c= (f32)nP%u;", op[0], b[0])) return 0;
+    size_t j = i + 4;
+    bool neg = false;
+    if (strip_eq(L[j], "ps0 = -ps0;") && strip_eq(L[j + 1], "ps1 = -ps1;")) { neg = true; j += 2; }
+    if (j + 1 >= n || !pmatch(L[j], "\1nF\2 = dolrecomp_ps_round(ps0);", NULL, d, NULL)) return 0;
+    if (!strip_is(L[j + 1], "nP%u = dolrecomp_ps_round(ps1);", d[0])) return 0;
+    push_fmt(out, "%.*snrv_v2f ps_ = nrv_f(nV%u) * nrv_f(nV%u);", (int)ind, L[i], v[0], v[1]);
+    push_fmt(out, "%.*sps_ %c= nrv_f(nV%u);", (int)ind, L[i], op[0], b[0]);
+    if (neg) push_fmt(out, "%.*sps_ = -ps_;", (int)ind, L[i]);
+    push_fmt(out, "%.*snV%u = nrv_d(ps_);", (int)ind, L[i], d[0]);
+    return j + 2 - i;
+}
+
+/* `<ws><head>X);` -> X (a copy), the prototype's greedy `(.*)\);$` */
+static char* round_arg(const char* l, const char* head, size_t* ind) {
+    const char* s = l;
+    while (*s == ' ' || *s == '\t') s++;
+    if (ind) *ind = (size_t)(s - l);
+    if (!starts(s, head)) return NULL;
+    s += strlen(head);
+    size_t k = strlen(s);
+    if (k < 2 || strcmp(s + k - 2, ");") != 0) return NULL;
+    char* x = malloc(k - 1);
+    memcpy(x, s, k - 2);
+    x[k - 2] = 0;
+    return x;
+}
+
+/* ps_merge00..11 / ps_muls0/1 / ps_madds0/1: `{ f64 d0 = dolrecomp_ps_round(X0);` + `f64 d1 = ...(X1);` +
+ * `nFd = d0; nPd = d1; }` -> one vector statement; false = not one of those */
+static bool simd_s01(char** L, size_t n, size_t i, Lines* out) {
+    if (i + 2 >= n) return false;
+    size_t ind;
+    unsigned d[2];
+    char* x0 = round_arg(L[i], "{ f64 d0 = dolrecomp_ps_round(", &ind);
+    char* x1 = x0 ? round_arg(L[i + 1], "f64 d1 = dolrecomp_ps_round(", NULL) : NULL;
+    bool ok = x1 && pmatch(L[i + 2], "\1nF\2 = d0; nP\2 = d1; }", NULL, d, NULL) && d[1] == d[0];
+    unsigned a[3], b[3];
+    char c0[1], c1[1];
+    char buf[256];
+    if (ok && pmatch(x0, "n\4\2", NULL, a, c0) && pmatch(x1, "n\4\2", NULL, b, c1)) {
+        push_fmt(out, "%.*s{ nrv_v2d t_ = __builtin_shufflevector(nV%u, nV%u, %d, %d); nV%u = nrv_round(t_); }", (int)ind,
+                 L[i], a[0], b[0], c0[0] == 'F' ? 0 : 1, 2 + (c1[0] == 'F' ? 0 : 1), d[0]);
+    } else if (ok && pmatch(x0, "nF\2 * dolrecomp_force25(n\4\2)", NULL, a, c0) &&
+               snprintf(buf, sizeof(buf), "nP%u * dolrecomp_force25(n%c%u)", a[0], c0[0], a[1]) > 0 && strcmp(x1, buf) == 0) {
+        push_fmt(out, "%.*snV%u = nrv_round(nV%u * nrv_force25(%s(nV%u)));", (int)ind, L[i], d[0], a[0],
+                 c0[0] == 'F' ? "NRV_S0" : "NRV_S1", a[1]);
+    } else if (ok && pmatch(x0, "(f32)nF\2 * (f32)n\4\2 + (f32)nF\2", NULL, a, c0) &&
+               snprintf(buf, sizeof(buf), "(f32)nP%u * (f32)n%c%u + (f32)nP%u", a[0], c0[0], a[1], a[2]) > 0 &&
+               strcmp(x1, buf) == 0) {
+        push_fmt(out, "%.*s{ nrv_v2f t_ = nrv_f(nV%u) * nrv_f(%s(nV%u)) + nrv_f(nV%u); nV%u = nrv_d(t_); }", (int)ind, L[i],
+                 a[0], c0[0] == 'F' ? "NRV_S0" : "NRV_S1", a[1], a[2], d[0]);
+    } else {
+        ok = false;
+    }
+    free(x0);
+    free(x1);
+    return ok;
+}
+
+/* The --region-simd rewrite of one finished region block; NULL = left scalar (too few paired-single ops, or no
+ * single FP-local declaration line to rewrite). */
+static char* simd_region(const char* block) {
+    Lines L = {0}, out = {0};
+    for (const char *p = block, *q;; p = q + 1) {
+        q = strchr(p, '\n');
+        if (!q) { lines_push(&L, strdup(p)); break; }
+        char* l = malloc((size_t)(q - p) + 1);
+        memcpy(l, p, (size_t)(q - p));
+        l[q - p] = 0;
+        lines_push(&L, l);
+    }
+    unsigned nps = 0;
+    size_t end = L.n, decl = 0, ndecl = 0;
+    for (size_t i = 0; i < L.n; i++) {
+        if (starts(L.v[i], "#undef NAT_WB")) { end = i; break; }
+        if (is_ps_op(L.v[i])) nps++;
+        unsigned k;
+        bool same;
+        for (const char* p = strstr(L.v[i], "f64 nF"); p; p = strstr(p + 1, "f64 nF"))
+            if (fp_decl_at(L.v[i], p, &k, &same)) { decl = i; ndecl++; break; }
+    }
+    if (nps < kSimdMinOps || ndecl != 1 || end == L.n) { lines_free(&L); return NULL; }
+
+    unsigned regs[32];
+    size_t nregs = 0;
+    for (size_t i = 0; i < decl; i++) lines_push(&out, strdup(L.v[i]));
+    {
+        Str o = {0};
+        const char* l = L.v[decl];
+        const char* s = l;
+        for (const char* p = strstr(s, "f64 nF"); p; p = strstr(p, "f64 nF")) {
+            unsigned k;
+            bool same;
+            const char* e = fp_decl_at(l, p, &k, &same);
+            if (!e || !same || nregs == 32) { p++; continue; }
+            str_add(&o, s, (size_t)(p - s));
+            str_printf(&o, "nrv_v2d nV%u = { ctx->fpr[%u], ctx->ps1[%u] };", k, k, k);
+            regs[nregs++] = k;
+            s = p = e;
+        }
+        str_puts(&o, s);
+        lines_push(&out, str_take(&o));
+    }
+    for (size_t r = 0; r < nregs; r++) {
+        push_fmt(&out, "#define nF%u (nV%u[0])", regs[r], regs[r]);
+        push_fmt(&out, "#define nP%u (nV%u[1])", regs[r], regs[r]);
+    }
+    for (size_t i = decl + 1; i < L.n;) {
+        const char* l = L.v[i];
+        if (i >= end) {
+            lines_push(&out, strdup(l));
+            if (i == end)
+                for (size_t r = 0; r < nregs; r++) {
+                    push_fmt(&out, "#undef nF%u", regs[r]);
+                    push_fmt(&out, "#undef nP%u", regs[r]);
+                }
+            i++;
+            continue;
+        }
+        const char* nx = i + 1 < L.n ? L.v[i + 1] : "";
+        size_t ind;
+        unsigned v[4];
+        char op[1];
+        if (pmatch(l, "\1nF\2 = dolrecomp_ps_round((f32)nF\2 \3 (f32)nF\2);", &ind, v, op) &&
+            line_is(nx, "%.*snP%u = dolrecomp_ps_round((f32)nP%u %c (f32)nP%u);", (int)ind, l, v[0], v[1], op[0], v[2])) {
+            push_fmt(&out, "%.*snV%u = nrv_d(nrv_f(nV%u) %c nrv_f(nV%u));", (int)ind, l, v[0], v[1], op[0], v[2]);
+        } else if (pmatch(l, "\1nF\2 = dolrecomp_ps_round(nF\2 * dolrecomp_force25(nF\2));", &ind, v, NULL) &&
+                   line_is(nx, "%.*snP%u = dolrecomp_ps_round(nP%u * dolrecomp_force25(nP%u));", (int)ind, l, v[0], v[1], v[2])) {
+            push_fmt(&out, "%.*snV%u = nrv_round(nV%u * nrv_force25(nV%u));", (int)ind, l, v[0], v[1], v[2]);
+        } else if (pmatch(l, "\1nF\2 = ((f32)nF\2 >= 0.0f) ? nF\2 : nF\2;", &ind, v, NULL) &&
+                   line_is(nx, "%.*snP%u = ((f32)nP%u >= 0.0f) ? nP%u : nP%u;", (int)ind, l, v[0], v[1], v[2], v[3])) {
+            push_fmt(&out, "%.*snV%u = nrv_sel(nV%u, nV%u, nV%u);", (int)ind, l, v[0], v[1], v[2], v[3]);
+        } else if (pmatch(l, "\1nF\2 = nF\2;", &ind, v, NULL) && line_is(nx, "%.*snP%u = nP%u;", (int)ind, l, v[0], v[1])) {
+            push_fmt(&out, "%.*snV%u = nV%u;", (int)ind, l, v[0], v[1]);
+        } else {
+            size_t used = simd_madd(L.v, end, i, &out);
+            if (used) { s_simd_madd++; i += used; continue; }
+            if (simd_s01(L.v, end, i, &out)) { s_simd_s01++; i += 3; continue; }
+            if (pmatch(l, "\1if (__builtin_expect(nreg_q0_ok(ctx, ea), 1)) NREG_PSQ_L2(ea, nF\2, nP\2); else {", &ind, v, NULL)) {
+                push_fmt(&out, "%.*sif (__builtin_expect(nreg_q0_ok(ctx, ea), 1)) { f64 a_, b_; NREG_PSQ_L2(ea, a_, b_); "
+                               "nrv_v2d t_ = { a_, b_ }; nV%u = t_; } else {", (int)ind, l, v[0]);
+                s_simd_psql++;
+                i++;
+                continue;
+            }
+            lines_push(&out, strdup(l));
+            i++;
+            continue;
+        }
+        s_simd_pairs++;
+        i += 2;
+    }
+    s_simd_regions++;
+    Str o = {0};
+    for (size_t i = 0; i < out.n; i++) {
+        if (i) str_puts(&o, "\n");
+        str_puts(&o, out.v[i]);
+    }
+    lines_free(&L);
+    lines_free(&out);
+    return str_take(&o);
+}
+
 static bool write_chunk(Chunk* c) {
     FILE* w = fopen(c->path, "wb");
     if (!w) { fprintf(stderr, "native-regions: cannot write %s\n", c->path); return false; }
@@ -1079,6 +1367,7 @@ static bool write_chunk(Chunk* c) {
         if (!header && i + 1 < c->work.n && strcmp(c->work.v[i], "#include \"../generated.h\"") == 0) {
             fputs(kHelpers, w);
             if (s_psq_direct) fputs(kPsqHelpers, w);
+            if (c->simd) fputs(kSimdPrelude, w);
             header = true;
         }
     }
@@ -1193,6 +1482,10 @@ bool native_regions_apply(const char* chunks_dir) {
                 else printf("native-regions: %08X: overhang copy left as emitted: %s\n", start, why);
                 continue;
             }
+            if (s_region_simd) {
+                char* v = simd_region(block);
+                if (v) { free(block); block = v; c->simd = true; }
+            }
             lines_push(&c->work, NULL);
             memmove(&c->work.v[a + 2], &c->work.v[a + 1], (c->work.n - (size_t)a - 2) * sizeof(char*));
             c->work.v[a + 1] = block;
@@ -1233,6 +1526,9 @@ bool native_regions_apply(const char* chunks_dir) {
     s_fn_n = s_fn_cap = 0;
     printf("native-regions: %u of %u regions made native (%u copies, %u resume entries, %u calls inlined, %u skipped), "
            "%u chunk files\n", made, (unsigned)s_region_count, copies, resumes, calls, skipped, files);
+    if (s_region_simd)
+        printf("native-regions: --region-simd: %u region copies vectorised (%u op pairs, %u madd-family, %u s0/s1/merge, "
+               "%u psq_l)\n", s_simd_regions, s_simd_pairs, s_simd_madd, s_simd_s01, s_simd_psql);
     return ok;
 }
 

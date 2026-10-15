@@ -917,6 +917,83 @@ static void test_region_psq_off_untouched(void) {
     free(b);
 }
 
+/* --region-simd: a loop with eight paired-single ops, one of each form the rewrite knows */
+static void simd_loop_program(u32* w) {
+    for (u32 i = 0; i < 2 * WIN; i++) w[i] = 0x60000000u;
+    w[WIN - 1] = 0x48000004u;
+    u32 k = WIN;
+    w[k++] = 0x39200004u; /* 40 li         r9, 4             */
+    w[k++] = 0x7D2903A6u; /* 44 mtctr      r9                */
+    w[k++] = 0xE0240000u; /* 48 psq_l      f1, 0(r4), 0, 0   */
+    w[k++] = 0x1041082Au; /* 4C ps_add     f2, f1, f1        */
+    w[k++] = 0x10620072u; /* 50 ps_mul     f3, f2, f1        */
+    w[k++] = 0x108118BAu; /* 54 ps_madd    f4, f1, f2, f3    */
+    w[k++] = 0x10A40828u; /* 58 ps_sub     f5, f4, f1        */
+    w[k++] = 0x10C02890u; /* 5C ps_mr      f6, f5            */
+    w[k++] = 0x10E53460u; /* 60 ps_merge01 f7, f5, f6        */
+    w[k++] = 0x11070058u; /* 64 ps_muls0   f8, f7, f1        */
+    w[k++] = 0x1128385Eu; /* 68 ps_madds1  f9, f8, f1, f7    */
+    w[k++] = 0xF1240000u; /* 6C psq_st     f9, 0(r4), 0, 0   */
+    w[k++] = 0x4200FFD8u; /* 70 bdnz       0x80100048        */
+    w[k++] = 0x4E800020u; /* 74 blr                          */
+    w[2 * WIN - 1] = 0x4E800020u;
+}
+
+static char* simd_region_text(const char* T, bool many, bool flag) {
+    u32 w[2 * WIN];
+    if (many) simd_loop_program(w);
+    else psq_loop_program(w, 0xE0240000u);
+    u32 hot[] = {BASE, BASE + 0x40, BASE + 0x48};
+    char* dir = mkdir_tmp();
+    char* log = NULL;
+    expect(T, gen_tree(w, 2 * WIN, BASE, WIN, 8, hot, 3, dir), "fixture generated");
+    native_regions_set_psq_direct(true);
+    native_regions_set_simd(flag);
+    expect(T, apply(dir, many ? "80100040 80100074\n" : "80100040 8010005C\n", &log), "pass ran");
+    native_regions_set_simd(false);
+    native_regions_set_psq_direct(false);
+    char* b = chunk_text(dir, 1);
+    expect(T, b && strstr(b, "/* NATIVE REGION 80100040"), "region made native");
+    if (b && !strstr(b, "/* NATIVE REGION 80100040")) fprintf(stderr, "--- %s log:\n%s\n", T, log ? log : "(none)");
+    free(log); rm_tmp(dir);
+    return b;
+}
+
+static void test_region_simd(void) {
+    const char* T = "region_simd";
+    char* b = simd_region_text(T, true, true);
+    expect(T, b && strstr(b, "typedef double nrv_v2d __attribute__((vector_size(16)));"), "vector helpers written");
+    expect(T, b && strstr(b, "nrv_v2d nV1 = { ctx->fpr[1], ctx->ps1[1] };"), "FP local pair declared as one vector");
+    expect(T, b && strstr(b, "#define nF1 (nV1[0])") && strstr(b, "#define nP1 (nV1[1])"), "lane macros");
+    expect(T, b && strstr(b, "#undef nF1") && strstr(b, "#undef nP1"), "lane macros undone at the region end");
+    expect(T, b && strstr(b, "nV2 = nrv_d(nrv_f(nV1) + nrv_f(nV1));"), "ps_add as one vector op");
+    expect(T, b && strstr(b, "nV3 = nrv_round(nV2 * nrv_force25(nV1));"), "ps_mul as one vector op");
+    expect(T, b && strstr(b, "nrv_v2f ps_ = nrv_f(nV1) * nrv_f(nV2);") && strstr(b, "ps_ += nrv_f(nV3);") &&
+                  strstr(b, "nV4 = nrv_d(ps_);"), "ps_madd as two vector statements (no FMA contraction)");
+    expect(T, b && strstr(b, "nV5 = nrv_d(nrv_f(nV4) - nrv_f(nV1));"), "ps_sub as one vector op");
+    expect(T, b && strstr(b, "nV6 = nV5;"), "ps_mr as a vector move");
+    expect(T, b && strstr(b, "__builtin_shufflevector(nV5, nV6, 0, 3); nV7 = nrv_round(t_);"), "ps_merge01 as a shuffle");
+    expect(T, b && strstr(b, "nV8 = nrv_round(nV7 * nrv_force25(NRV_S0(nV1)));"), "ps_muls0 with a lane splat");
+    expect(T, b && strstr(b, "nrv_f(nV8) * nrv_f(NRV_S1(nV1)) + nrv_f(nV7); nV9 = nrv_d(t_);"), "ps_madds1 with a lane splat");
+    expect(T, b && strstr(b, "NREG_PSQ_L2(ea, a_, b_); nrv_v2d t_ = { a_, b_ }; nV1 = t_; } else {"), "psq_l through temporaries");
+    expect(T, b && !strstr(b, "f64 nF1 = ctx->fpr[1]"), "no scalar pair left for a vector register");
+    free(b);
+}
+
+static void test_region_simd_few_ops_scalar(void) {
+    const char* T = "region_simd_few_ops_scalar";
+    char* b = simd_region_text(T, false, true);
+    expect(T, b && !strstr(b, "nrv_v2d"), "one ps op: region stays scalar, no helpers");
+    free(b);
+}
+
+static void test_region_simd_off_untouched(void) {
+    const char* T = "region_simd_off_untouched";
+    char* b = simd_region_text(T, true, false);
+    expect(T, b && !strstr(b, "nrv_v2d") && strstr(b, "f64 nF1 = ctx->fpr[1], nP1 = ctx->ps1[1];"), "flag off: scalar pairs");
+    free(b);
+}
+
 int main(void) {
     test_overhang_copy_patched();
     test_partial_span_not_patched();
@@ -946,6 +1023,9 @@ int main(void) {
     test_region_psq_direct();
     test_region_psq_quantised_untouched();
     test_region_psq_off_untouched();
+    test_region_simd();
+    test_region_simd_few_ops_scalar();
+    test_region_simd_off_untouched();
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

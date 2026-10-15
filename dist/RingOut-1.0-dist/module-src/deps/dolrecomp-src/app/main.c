@@ -48,6 +48,7 @@ int main(int argc, char** argv) {
     native_skin_set_simd(opts.skin_simd != 0);
     native_leaves_set(opts.inline_leaves);
     native_regions_set_psq_direct(opts.region_psq != 0);
+    native_regions_set_simd(opts.region_simd != 0);
     if (opts.native_regions) {
         if (!native_regions_load(opts.native_regions))
             return 1;

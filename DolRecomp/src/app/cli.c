@@ -37,6 +37,7 @@ void print_usage(const char* argv0) {
     fprintf(stderr, "  --inline-leaves <N>            Inline leaf callees of at most N instructions at native call sites\n");
     fprintf(stderr, "  --skin-simd                    With --native-skin: paired singles as two-lane vectors in the skin loops\n");
     fprintf(stderr, "  --region-psq                   Float psq_l/psq_st in native regions skip the CPU-state round trip\n");
+    fprintf(stderr, "  --region-simd                  Paired singles in native regions as two-lane vectors\n");
     fprintf(stderr, "  --ram-bases <list>             D-form loads/stores based on these registers (e.g.\n");
     fprintf(stderr, "                                 1,2,13) skip the range test: they only reach RAM\n");
     fprintf(stderr, "  --preserve-none                Chunk functions use clang's preserve_none convention\n");
@@ -237,6 +238,10 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
         }
         if (strcmp(arg, "--region-psq") == 0) {
             opts->region_psq = 1;
+            continue;
+        }
+        if (strcmp(arg, "--region-simd") == 0) {
+            opts->region_simd = 1;
             continue;
         }
         if (strcmp(arg, "--inline-leaves") == 0) {

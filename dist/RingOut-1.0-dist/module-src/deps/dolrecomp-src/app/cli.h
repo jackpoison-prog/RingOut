@@ -47,6 +47,7 @@ typedef struct {
     const char* native_regions; // --native-regions <file>: hot guest regions run as native C
     int skin_simd;              // --skin-simd: two-lane vectors in the native skin loops
     int region_psq;             // --region-psq: direct float psq_l/psq_st inside native regions
+    int region_simd;            // --region-simd: two-lane paired singles inside native regions
     unsigned inline_leaves;     // --inline-leaves <N>: inline leaf callees of at most N instructions (0 = off)
     int ca_liveness;
     int ca_elide;       // --ca-elide (changes codegen; off by default)
