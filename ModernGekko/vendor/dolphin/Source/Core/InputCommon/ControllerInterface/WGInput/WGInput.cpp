@@ -755,6 +755,15 @@ void DeInit()
   WGI::RawGameController::RawGameControllerAdded(s_event_added);
   WGI::RawGameController::RawGameControllerRemoved(s_event_removed);
 
+  // C++/WinRT caches every activation factory for the life of the PROCESS, and
+  // uninit_apartment below releases the COM state those factories live in. Ring
+  // Out restarts the session in place (netplay from the in-game menu, record,
+  // replay), so the next Init() called RawGameControllerAdded through a dangling
+  // cached factory and crashed with an access violation (RingOut#19, Windows
+  // only: WGInput is an MSVC-only backend). Upstream DolphinNoGUI never restarts
+  // in-process. Drop the cache while the apartment is still up.
+  winrt::clear_factory_cache();
+
   if (s_initialized_winrt)
   {
     winrt::uninit_apartment();

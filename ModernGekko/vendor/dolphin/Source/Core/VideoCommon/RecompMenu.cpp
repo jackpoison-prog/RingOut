@@ -3840,14 +3840,23 @@ void PollMenuGamepad()
   // walked every key for nothing: ~2% of the whole process in windowed play
   // (perf, 2026-09-30: HostTick -> IsMatchingName -> XInput2 Key::GetName).
   // Devices are immutable once created and hot-plug replaces the object, so a
-  // pointer change is the whole invalidation; holding the shared_ptr keeps the
-  // cached inputs alive until then.
+  // pointer change is the whole invalidation. The cached inputs are only read
+  // while `device` -- a live shared_ptr -- is the cached one, so they cannot
+  // dangle.
+  //
+  // A WEAK pointer, not a shared one. This static outlives the session, and a
+  // strong reference kept the first session's keyboard object alive after the
+  // runtime shut down. On Windows that is fatal to input: DInput creates the
+  // keyboard only while its static s_keyboard_mouse_exists is false, and only
+  // the object's destructor clears it -- so after an in-place restart (netplay
+  // from the menu, record, replay) the second session had NO keyboard at all
+  // ("0 of 29 controls bound", found verifying the RingOut#19 fix).
   static constexpr const char* kInputNames[] = {"Pad N",    "Pad S",    "Pad W", "Pad E",
                                                 "Button S", "Button E", "Button W", "Back",
                                                 "Guide"};
-  static std::shared_ptr<ciface::Core::Device> cached_device;
+  static std::weak_ptr<ciface::Core::Device> cached_device;
   static const ciface::Core::Device::Input* cached_inputs[std::size(kInputNames)] = {};
-  if (cached_device != device)
+  if (cached_device.lock() != device)
   {
     cached_device = device;
     for (std::size_t i = 0; i < std::size(kInputNames); ++i)

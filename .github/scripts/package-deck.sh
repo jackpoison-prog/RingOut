@@ -160,8 +160,8 @@ install -m 755 "$RUNTIME"        "$STAGE/bin/moderngekko-run"
 # "Ver ..." therefore read 1.5 out of a 1.5.1 binary and failed a correct
 # package. The banner is too long to be inlined, so it is always the real thing.
 embedded="$(strings "$STAGE/bin/moderngekko-run" 2>/dev/null |
-            grep -m1 -oE 'RING OUT[[:space:]]+-[[:space:]]+Ver [0-9]+\.[0-9]+(\.[0-9]+)?' |
-            grep -oE 'Ver [0-9]+\.[0-9]+(\.[0-9]+)?' || true)"
+            grep -m1 -oE 'RING OUT[[:space:]]+-[[:space:]]+Ver [0-9]+\.[0-9]+(\.[0-9]+){0,2}' |
+            grep -oE 'Ver [0-9]+\.[0-9]+(\.[0-9]+){0,2}' || true)"
 if [ -z "$embedded" ]; then
   echo "  WARNING: no version string found in the runtime; cannot check it" >&2
 elif [ "$embedded" != "Ver $VERSION" ]; then
@@ -216,9 +216,9 @@ install -m 644 "$SRC/BUILD-ON-THE-DECK.md" "$STAGE/BUILD-ON-THE-DECK.md"
 # Version-stamped the same way, and matching ANY version rather than the one
 # that happened to be current when this was written: a literal pattern stops
 # matching the moment someone hand-edits the doc, and stops SILENTLY.
-sed -i -E "s/RingOut-[0-9]+\.[0-9]+(\.[0-9]+)?-/RingOut-$VERSION-/g" \
+sed -i -E "s/RingOut-[0-9]+\.[0-9]+(\.[0-9]+){0,2}-/RingOut-$VERSION-/g" \
     "$STAGE/BUILD-ON-THE-DECK.md"
-if grep -qE "RingOut-[0-9]+\.[0-9]+(\.[0-9]+)?-" "$STAGE/BUILD-ON-THE-DECK.md" &&
+if grep -qE "RingOut-[0-9]+\.[0-9]+(\.[0-9]+){0,2}-" "$STAGE/BUILD-ON-THE-DECK.md" &&
    ! grep -q "RingOut-$VERSION-" "$STAGE/BUILD-ON-THE-DECK.md"; then
   echo "  FAIL: BUILD-ON-THE-DECK.md still names a version that is not $VERSION" >&2
   exit 1
