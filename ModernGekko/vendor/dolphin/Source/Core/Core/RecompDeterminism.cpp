@@ -43,6 +43,10 @@ struct Config
   // harness, and a performance run wants the scripted route without it.
   bool hash = true;
 
+  // RINGOUT_DETERMINISM_ASPLAYED (NOHASH runs only): the route and the frame
+  // counter, with the emulation left in the player's shape. See IsAsPlayed.
+  bool as_played = false;
+
   // Whole-RAM snapshot at one frame. A hash says two runs differ; only a dump
   // says where, and an address is what turns a divergence into a subsystem.
   std::string dump_path;
@@ -281,6 +285,16 @@ Config& GetConfig()
       std::fprintf(stderr, "[determinism] NOHASH: input and frame counter only, "
                            "no hashing -- this run cannot verify determinism\n");
 
+    result.as_played = std::getenv("RINGOUT_DETERMINISM_ASPLAYED") != nullptr;
+    if (result.as_played && result.hash)
+    {
+      std::fprintf(stderr, "[determinism] ASPLAYED ignored: it needs NOHASH\n");
+      result.as_played = false;
+    }
+    if (result.as_played)
+      std::fprintf(stderr, "[determinism] ASPLAYED: dual-core, GPU determinism off -- "
+                           "runs differ, and the route can drift\n");
+
     result.active = true;
     return result;
   }();
@@ -293,6 +307,11 @@ u64 s_frame = 0;
 bool IsActive()
 {
   return GetConfig().active;
+}
+
+bool IsAsPlayed()
+{
+  return GetConfig().as_played;
 }
 
 bool IsWatchArmed()

@@ -128,12 +128,17 @@ jobs:
         # The PGO link flag goes to the runtime target alone
         # (MODERNGEKKO_RUNTIME_LINK_FLAGS, ModernGekko/CMakeLists.txt), never
         # to every link: dolrecomp is built in the same tree.
+        # /d1trimfile: __FILE__ (Dolphin's log and assert macros, cubeb's asserts) baked the runner's
+        # checkout path into the public exe 462 times, and that path is named after this repo
+        # (D:\a\<repo>\<repo>). Trimming the workspace prefix leaves paths relative to the checkout.
+        # "Check binaries for the build path" below fails the build if any survive.
         shell: pwsh
         run: |
           $t = '${{ steps.pgo.outputs.toolset }}'
           $ts = if ($t) { @('-T', "v143,version=$t") } else { @() }
+          $trim = "/d1trimfile:$env:GITHUB_WORKSPACE"
           cmake -S ModernGekko -B build -G "Visual Studio 17 2022" -A x64 @ts `
-            -DENABLE_LTO=ON "-DCMAKE_CXX_FLAGS_INIT=/wd5049" `
+            -DENABLE_LTO=ON "-DCMAKE_CXX_FLAGS_INIT=/wd5049 $trim" "-DCMAKE_C_FLAGS_INIT=$trim" `
             "-DMODERNGEKKO_RUNTIME_LINK_FLAGS=${{ steps.pgo.outputs.link }}" `
             -DENABLE_QT=OFF -DENABLE_TESTS=OFF -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -151,6 +156,25 @@ jobs:
           Get-ChildItem -Path build -Recurse -Include moderngekko-run.exe,dolrecomp.exe |
             ForEach-Object { Copy-Item $_.FullName staging/ }
           Get-ChildItem staging
+
+      - name: Check binaries for the build path
+        # The binaries ship publicly; this repo is private. Its name must not appear in them, as ASCII
+        # or as UTF-16 (MSVC's wide __FILE__ in asserts), whatever the configure flags above do.
+        shell: pwsh
+        run: |
+          $name = '${{ github.event.repository.name }}'
+          $bad = 0
+          foreach ($f in Get-ChildItem staging -Filter *.exe) {
+            $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($f.FullName))
+            foreach ($enc in [Text.Encoding]::ASCII, [Text.Encoding]::Unicode) {
+              $needle = [Text.Encoding]::Latin1.GetString($enc.GetBytes($name))
+              $n = 0; $i = 0
+              while (($i = $text.IndexOf($needle, $i, [StringComparison]::Ordinal)) -ge 0) { $n++; $i += $needle.Length }
+              if ($n) { Write-Output "::error::$($f.Name) contains '$name' $n times ($($enc.EncodingName))"; $bad += $n }
+            }
+          }
+          if ($bad) { exit 1 }
+          Write-Output "no '$name' in the staged binaries"
 
       - name: Upload binaries for a play test
         # Build-only dispatches published nothing, so a branch's runtime could not be fetched without

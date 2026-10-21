@@ -724,11 +724,11 @@ static void test_crlf_chunks_patched(void) {
     free(before); free(b); free(log); rm_tmp(dir);
 }
 
-/* --indirect-calls: a native call inside a region would run with the guest registers still in C locals, so the
- * pass drops the DOLRECOMP_INDIRECT_CALL line there and the bctrl exits as it always did; the original code
- * outside the region keeps the native call. */
-static void test_indirect_call_dropped_in_region(void) {
-    const char* T = "indirect_call_dropped_in_region";
+/* --indirect-calls: with --region-indirect-calls the region keeps the native call, writing its locals back
+ * first (the callee runs on ctx) and returning to its resume entry; without the flag it drops the
+ * DOLRECOMP_INDIRECT_CALL line and the bctrl exits to the dispatcher. Either way the original code outside the
+ * region keeps the native call. */
+static void indirect_call_region(const char* T, bool flag) {
     u32 w[2 * WIN];
     for (u32 i = 0; i < 2 * WIN; i++) w[i] = 0x60000000u; /* nop */
     w[WIN - 1] = 0x4E800020u;                           /* blr: window 1 ends */
@@ -750,19 +750,31 @@ static void test_indirect_call_dropped_in_region(void) {
     expect(T, before && strstr(before, "DOLRECOMP_INDIRECT_CALL(target, 0x80100050u, label_80100050);"),
            "the emitter wrote the native call");
     free(before);
+    native_regions_set_indirect_calls(flag);
     expect(T, apply(dir, "80100040 80100058\n", &log), "pass ran");
+    native_regions_set_indirect_calls(false);
     char* b = chunk_text(dir, 1);
     const char* r = b ? strstr(b, "/* NATIVE REGION 80100040") : NULL;
     const char* r_end = r ? strstr(r, "#undef NAT_RL") : NULL;
     expect(T, r && r_end, "region made native");
     if (r && r_end) {
         const char* m = strstr(r, "DOLRECOMP_INDIRECT_CALL(");
-        expect(T, !m || m > r_end, "no native call inside the region");
-        expect(T, m != NULL, "the original code after the region keeps it");
+        if (flag) {
+            /* The call stays native, after a write-back; it returns to the resume entry at 50, which reloads. */
+            const char* k = strstr(r, "{ NAT_WB(); DOLRECOMP_INDIRECT_CALL(target, 0x80100050u, nreg_e_80100050); "
+                                      "DOLRECOMP_RETURN; }");
+            expect(T, k && k < r_end, "the native call is kept inside the region, written back first");
+        } else {
+            expect(T, m && m > r_end, "flag off: no native call inside the region");
+        }
+        expect(T, strstr(r_end, "DOLRECOMP_INDIRECT_CALL(") != NULL, "the original code after the region keeps it");
     }
     if (!r) fprintf(stderr, "--- %s log:\n%s\n", T, log ? log : "(none)");
     free(b); free(log); rm_tmp(dir);
 }
+
+static void test_indirect_call_native_in_region(void) { indirect_call_region("indirect_call_native_in_region", true); }
+static void test_indirect_call_dropped_flag_off(void) { indirect_call_region("indirect_call_dropped_flag_off", false); }
 
 /* ---- --inline-leaves ---- */
 static bool apply_leaves(const char* dir, unsigned max, char** log) {
@@ -1016,7 +1028,8 @@ int main(void) {
     test_call_exit_refunds();
     test_inlined_call_resyncs_twins();
     test_crlf_chunks_patched();
-    test_indirect_call_dropped_in_region();
+    test_indirect_call_native_in_region();
+    test_indirect_call_dropped_flag_off();
     test_leaf_inlined_both_copies();
     test_leaf_loop_not_inlined();
     test_leaf_off_untouched();

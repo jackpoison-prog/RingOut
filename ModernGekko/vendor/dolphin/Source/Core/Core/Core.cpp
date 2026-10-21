@@ -292,6 +292,24 @@ static void CPUSetInitialExecutionState(Core::System& system, bool force_paused 
   Host_UpdateDisasmDialog();
 }
 
+// The emulation's two hot threads go above the rest of the process (Windows only). On a 2-core laptop
+// (A4-9125) the CPU and video threads share both cores with the Vulkan submission, audio, input and OS
+// threads; raising these two to ABOVE_NORMAL measured +4.9% fight fps there (three runs each, no
+// overlap). Raising a thread on Linux needs CAP_SYS_NICE, so it is left alone there.
+//
+// The CPU thread goes one step higher than the video thread. It is the critical path, and at equal
+// priority a kernel trace of a fight on that laptop showed it ready to run but switched out 10% of
+// the time. CPU thread HIGHEST over the video thread's ABOVE_NORMAL measured +4.9% fight fps there
+// (six runs each); lowering the video thread to NORMAL instead measured +3.0 to +3.3%.
+// Single-core keeps ABOVE_NORMAL: its one thread does both jobs.
+static void RaiseEmulationThreadPriority(bool highest)
+{
+#ifdef _WIN32
+  SetThreadPriority(GetCurrentThread(),
+                    highest ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL);
+#endif
+}
+
 // Create the CPU thread, which is a CPU + Video thread in Single Core mode.
 static void CpuThread(Core::System& system, const std::optional<std::string>& savestate_path,
                       bool delete_savestate)
@@ -300,6 +318,7 @@ static void CpuThread(Core::System& system, const std::optional<std::string>& sa
     Common::SetCurrentThreadName("CPU thread");
   else
     Common::SetCurrentThreadName("CPU-GPU thread");
+  RaiseEmulationThreadPriority(system.IsDualCoreMode());
 
   // This needs to be delayed until after the video backend is ready.
   DolphinAnalytics::Instance().ReportGameStart();
@@ -444,6 +463,7 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
     // Spawn the GPU thread.
     std::thread gpu_thread{[&] {
       Common::SetCurrentThreadName("Video thread");
+      RaiseEmulationThreadPriority(false);
 
       const bool is_init = init_video();
       init_from_thread.set_value(is_init);
@@ -878,8 +898,10 @@ void UpdateWantDeterminism(Core::System& system, bool initial)
   // netplay -- and it has to go through the same switch, because this also
   // drives FIFO determinism and JIT FMA use, either of which would otherwise
   // make the measurement disagree with the netplay it is meant to predict.
-  bool new_want_determinism = system.GetMovie().IsMovieActive() ||
-                              NetPlay::IsNetPlayRunning() || RecompDeterminism::IsActive();
+  // An as-played harness run (RecompDeterminism::IsAsPlayed) opts out: it measures the player's shape.
+  bool new_want_determinism =
+      system.GetMovie().IsMovieActive() || NetPlay::IsNetPlayRunning() ||
+      (RecompDeterminism::IsActive() && !RecompDeterminism::IsAsPlayed());
   if (new_want_determinism != s_wants_determinism || initial)
   {
     NOTICE_LOG_FMT(COMMON, "Want determinism <- {}", new_want_determinism ? "true" : "false");

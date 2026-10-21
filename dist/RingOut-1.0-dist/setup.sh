@@ -504,12 +504,20 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS|GRSPAF) LEADER_CASES+=(--function-overha
 # straight between guest RAM and the region's locals instead of through the CPU
 # state, whenever the recompiled code's own fast path would apply: -1.51% on top.
 case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS|GRSPAF) LEADER_CASES+=(--inline-leaves 32 --skin-simd --region-psq);; esac
-# --region-simd (US only so far, 2026-10-15): in the native regions with at least
+# --region-simd (US 2026-10-15; JP and Plus 2026-10-16; NOT PAL): in the native regions with at least
 # 8 paired-single ops, each paired-single register is one two-lane vector and
 # the ops that have a two-lane form with the same arithmetic run as one vector
 # op. Frame hashes identical; Steam Deck, both arms retrained: -0.98% and
 # -1.17% cycles in two rounds.
-case "$DISC_ID" in GRSEAF) LEADER_CASES+=(--region-simd);; esac
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS) LEADER_CASES+=(--region-simd);; esac
+# --region-indirect-calls (US, JP and Plus, 2026-10-16; NOT PAL): a native region that
+# reaches an --indirect-calls call makes it natively, as the original code does,
+# instead of exiting to the dispatcher there. That changes when timing events
+# run, so frame hashes change (deterministically). Steam Deck, same work, all arms
+# retrained: -1.20% cycles. JP and Plus took both flags together: -0.68% and -1.68%
+# (same work, both arms retrained). PAL measured +0.00% with them (ranges overlap),
+# so it keeps its 1.6.9 code and profiles.
+case "$DISC_ID" in GRSEAF|GRSJAF|GRSEPS) LEADER_CASES+=(--region-indirect-calls);; esac
 # The inline paired-single fast path (module-src CMakeLists MODULE_PSQ_FAST) has
 # the same constraint and the same gate: it changes chunk control flow, so a
 # disc needs a profile trained with it. US, JP and PAL all have one. Every

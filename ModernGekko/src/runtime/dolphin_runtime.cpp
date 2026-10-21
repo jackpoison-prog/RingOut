@@ -481,8 +481,11 @@ void ApplyCoreSettings(const GameMetadata &metadata) {
   const bool determinism_dual_core =
       RecompDeterminism::IsActive() &&
       std::getenv("RINGOUT_DETERMINISM_DUALCORE") != nullptr;
-  Config::SetBase(Config::MAIN_CPU_THREAD,
-                  !RecompDeterminism::IsActive() || determinism_dual_core);
+  // RINGOUT_DETERMINISM_ASPLAYED (NOHASH only): dual-core with the GPU thread in
+  // the player's "auto" mode, not the deterministic one -- see IsAsPlayed.
+  const bool determinism_as_played = RecompDeterminism::IsAsPlayed();
+  Config::SetBase(Config::MAIN_CPU_THREAD, !RecompDeterminism::IsActive() ||
+                                               determinism_dual_core || determinism_as_played);
 
   // Fast disc loading changes WHEN loads finish, and so every frame after the first one. The scripted
   // routes and their known hashes were all recorded at real disc speed; keep the harness there unless a
@@ -502,7 +505,18 @@ void ApplyCoreSettings(const GameMetadata &metadata) {
   // the reproducible choice: the DSP runs on the CPU thread rather than one
   // whose scheduling the host decides.
   Config::SetBase(Config::MAIN_DSP_THREAD, false);
-  if (determinism_dual_core)
+  // Keep the video thread within ~2M guest cycles (~4 ms) of the CPU thread. During the intro
+  // movie the CPU thread is busy decoding and the video thread can fall so far behind that the
+  // game reuses FIFO/display-list memory before it is read: "GFX FIFO: Unknown Opcode" (and
+  // "cmd2 = ...") in 4 of 4 dual-core runs on the 2-core Windows laptop, 0 of 4 at this
+  // distance. Dolphin's own 200000 default stopped them too but cost 14% of fight fps; this
+  // distance plus the proportional polling in Fifo::WaitForGpuThread is what the game needs.
+  // Only the non-deterministic GPU thread reads these; netplay, replays and the hash harness
+  // run the deterministic one and are unaffected.
+  Config::SetBase(Config::MAIN_SYNC_GPU, true);
+  Config::SetBase(Config::MAIN_SYNC_GPU_MAX_DISTANCE, 2000000);
+  Config::SetBase(Config::MAIN_SYNC_GPU_MIN_DISTANCE, -2000000);
+  if (determinism_dual_core && !determinism_as_played)
     Config::SetBase(Config::MAIN_GPU_DETERMINISM_MODE,
                     std::string("fake-completion"));
   if (RecompDeterminism::IsActive()) {

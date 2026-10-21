@@ -92,6 +92,10 @@ static bool s_enabled = false;
  * nF/nP locals when the helper's own fast-path test holds; anything else takes the helper as before. */
 static bool s_psq_direct = false;
 void native_regions_set_psq_direct(bool on) { s_psq_direct = on; }
+/* --region-indirect-calls: an --indirect-calls native call inside a region stays native (see transform). Off, the
+ * region drops it and exits to the dispatcher there, as before the flag. */
+static bool s_region_indirect = false;
+void native_regions_set_indirect_calls(bool on) { s_region_indirect = on; }
 
 bool native_regions_load(const char* path) {
     FILE* f = fopen(path, "r");
@@ -787,9 +791,29 @@ static char* transform(char** src, size_t a, size_t b, u32 start, u32 end, const
         if (psq_open && !strstr(region.v[i], "ctx->exception")) { *why = "psq helper without its exception check"; break; }
         char* l = strdup(region.v[i]);
         const char* s = lskip(l);
-        /* --indirect-calls: a native call here would run with the region's guest registers still in C locals.
-           Dropping the macro line leaves the ordinary exit after it -- write back, return -- as before the flag. */
-        if (starts(s, "DOLRECOMP_INDIRECT_CALL(")) { free(l); continue; }
+        /* --indirect-calls: with --region-indirect-calls, make the native call the original code makes here, the
+           same way. Dropping it (the exit after it: write back, return) is not equivalent: going back to the
+           dispatcher moves when CoreTiming events run, and with that the game -- region 80037BBC alone changed
+           both US hashes. Without the flag the line is still dropped, so a disc whose profile was trained on
+           that keeps its exact code. The locals are written back first, since the callee runs on ctx. Its
+           return lands on the region's resume entry when there is one (NAT_RL reloads every local), else on
+           the original code; a call that comes back anywhere else returns WITHOUT a second write-back, ctx
+           being newer than the locals. */
+        if (starts(s, "DOLRECOMP_INDIRECT_CALL(")) {
+            if (!s_region_indirect) { free(l); continue; }
+            const char* a0 = s + 24;
+            const char* c1 = strchr(a0, ',');
+            const char* r = c1 ? lskip(c1 + 1) : NULL;
+            u32 ret;
+            if (!r || !starts(r, "0x") || !hex8(r + 2, &ret)) { *why = "unparsed indirect call"; free(l); break; }
+            bool resumes = has_pc(labels, nl, ret) && has_pc(resume, n_resume, ret);
+            Str o = {0};
+            str_printf(&o, "%.*s{ NAT_WB(); DOLRECOMP_INDIRECT_CALL(%.*s, 0x%08Xu, %s_%08X); DOLRECOMP_RETURN; }",
+                       (int)indent_len(l), l, (int)(c1 - a0), a0, ret, resumes ? "nreg_e" : "label", ret);
+            lines_push(&out, str_take(&o));
+            free(l);
+            continue;
+        }
         if (starts(l, "/*NREG_INLINE_BEGIN")) { inl++; lines_push(&out, l); continue; }
         if (starts(l, "/*NREG_INLINE_END")) { inl--; lines_push(&out, l); continue; }
         u32 pc;

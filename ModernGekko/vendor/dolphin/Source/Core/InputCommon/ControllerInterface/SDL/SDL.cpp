@@ -226,11 +226,19 @@ InputBackend::InputBackend(ControllerInterface* controller_interface)
       }
     }
 
-    SDL_Event e;
-    while (SDL_WaitEvent(&e))
+    // Not SDL_WaitEvent: with no SDL video subsystem it has nothing to block on and pumps every
+    // millisecond (EVENT_POLL_INTERVAL_NS), which cost 2-3% of a core on a 2-core laptop. This
+    // thread only handles device add/remove and our two custom events -- pad state is read by
+    // UpdateInput through SDL_UpdateGamepads -- so pumping at 100 Hz loses nothing.
+    for (;;)
     {
-      if (!HandleEventAndContinue(e))
-        return;
+      SDL_Event e;
+      while (SDL_PollEvent(&e))
+      {
+        if (!HandleEventAndContinue(e))
+          return;
+      }
+      SDL_Delay(10);
     }
   });
 

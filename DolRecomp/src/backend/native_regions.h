@@ -15,6 +15,9 @@ bool native_regions_apply(const char* chunks_dir);
 void native_regions_set_psq_direct(bool on);
 /* --region-simd: two-lane paired singles in native regions with at least 8 ps ops (default off) */
 void native_regions_set_simd(bool on);
+/* --region-indirect-calls: an --indirect-calls native call inside a region stays native, written back first
+ * (default off: the region drops it and exits to the dispatcher there). */
+void native_regions_set_indirect_calls(bool on);
 /* --inline-leaves <N>: small leaf callees (at most N instructions) inlined at their native call sites.
  * Post-pass after native_regions_apply; 0 = off. */
 void native_leaves_set(unsigned max_insns);

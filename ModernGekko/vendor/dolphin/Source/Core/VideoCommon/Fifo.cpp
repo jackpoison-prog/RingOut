@@ -3,6 +3,7 @@
 
 #include "VideoCommon/Fifo.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -140,9 +141,17 @@ void FifoManager::EmulatorState(bool running)
 {
   m_emu_running_state.Set(running);
   if (running)
+  {
     m_gpu_mainloop.Wakeup();
+  }
   else
+  {
     m_gpu_mainloop.AllowSleep();
+    // The GPU loop stops draining while the emulator is not running, so it will never set this for a
+    // CPU thread blocked in WaitForGpuThread. Release it, or Core::Stop waits forever for a CPU thread
+    // that cannot reach its PowerDown check (WaitForGpuThread no longer blocks from here on).
+    m_sync_wakeup_event.Set();
+  }
 }
 
 void FifoManager::SyncGPU(SyncGPUReason reason, bool may_move_read_ptr)
@@ -603,11 +612,17 @@ int FifoManager::WaitForGpuThread(int ticks)
   if (now < m_config_sync_gpu_min_distance)
     return GPU_TIME_SLOT_SIZE + m_config_sync_gpu_min_distance - now;
 
-  // Wait for GPU
-  if (now >= m_config_sync_gpu_max_distance)
+  // Wait for GPU -- unless the emulator is stopping or pausing: the GPU loop has stopped draining
+  // then, and nothing would wake us (see EmulatorState).
+  if (now >= m_config_sync_gpu_max_distance && m_emu_running_state.IsSet())
     m_sync_wakeup_event.Wait();
 
-  return GPU_TIME_SLOT_SIZE;
+  // Poll in proportion to the allowed lag, not every GPU_TIME_SLOT_SIZE (1000) cycles. Each poll
+  // is a CoreTiming event, and each event also ends the recompiled core's slice, so polling every
+  // 1000 cycles cost 14% of fight fps on a 2-core laptop at the default 200000-cycle distance --
+  // almost all of it bookkeeping, not waiting. At a distance of 2000000 an eighth of it is 250000
+  // cycles between polls: the lag stays bounded (at most max + max/8) for a sliver of the cost.
+  return std::max(GPU_TIME_SLOT_SIZE, m_config_sync_gpu_max_distance / 8);
 }
 
 void FifoManager::SyncGPUCallback(Core::System& system, u64 ticks, s64 cyclesLate)

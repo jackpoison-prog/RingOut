@@ -26,6 +26,14 @@ namespace RecompDeterminism
 // dolphin_runtime.cpp, which turns off the CPU thread when it is on.
 bool IsActive();
 
+// RINGOUT_DETERMINISM_ASPLAYED, with NOHASH: keep the scripted route and the
+// frame counter but leave the emulation as a player gets it -- dual-core, and no
+// wish for determinism, so the GPU thread runs in Dolphin's default "auto" mode
+// with no per-swap wait for it. The deterministic shape serialises the CPU and
+// GPU threads at every frame swap; on a 2-core machine, where they compete, that
+// understates play. Runs are not reproducible and the route can drift.
+bool IsAsPlayed();
+
 void OnFrame(Core::System& system);
 
 // Write watch. A dump says which address diverged; it cannot say what put the
