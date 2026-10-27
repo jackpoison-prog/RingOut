@@ -18,6 +18,7 @@
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/HW/SI/SI_Device.h"
+#include "Core/RecompWidescreen.h"
 #include "UICommon/UICommon.h"
 #include "VideoCommon/VideoConfig.h"
 
@@ -85,6 +86,34 @@ int main()
     return 8;
   if (Config::Get(Config::GFX_ASPECT_RATIO) != AspectMode::Auto)
     return 9;
+
+  // VIDEO tab, second row: Screen shape. With no disc there is no constant
+  // table, so the row must refuse -- and it must be the row under Widescreen,
+  // not Internal Resolution (which a missing row would leave there).
+  const int efb_before = Config::Get(Config::GFX_EFB_SCALE);
+  const auto shape_before = RecompWidescreen::GetShape();
+  RecompMenu::OnKey(Key::Down);
+  RecompMenu::OnKey(Key::Right);
+  if (Config::Get(Config::GFX_EFB_SCALE) != efb_before)
+    return 17;
+  if (RecompWidescreen::GetShape() != shape_before)
+    return 18;
+
+  // VIDEO tab, fourth row: Aspect Ratio. A screen shape shows as Dolphin's
+  // Custom aspect; the row must treat that as the 16:9 step it replaces, so
+  // Right goes to 4:3 -- not to 16:9, which is what reading Custom as "Auto"
+  // did, and which the shape logic then silently reverted.
+  Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Custom);
+  Config::SetBase(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH, 64);
+  Config::SetBase(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT, 27);
+  RecompMenu::OnKey(Key::Down);
+  RecompMenu::OnKey(Key::Down);
+  RecompMenu::OnKey(Key::Right);
+  if (Config::Get(Config::GFX_ASPECT_RATIO) != AspectMode::ForceStandard)
+    return 19;
+  Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Auto);
+  RecompMenu::OnKey(Key::Up);
+  RecompMenu::OnKey(Key::Up);
 
   // AUDIO tab, second row: Muted. A different tab and a different settings
   // system, so this catches a navigation change that happens to leave the

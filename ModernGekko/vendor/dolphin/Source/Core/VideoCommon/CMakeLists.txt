@@ -146,6 +146,11 @@ add_library(videocommon
   PostProcessing.h
   Present.cpp
   Present.h
+  RecompDisplayRefresh.cpp
+  RecompDisplayRefresh.h
+  RecompSmoothMotion.cpp
+  RecompSmoothMotion.h
+  RecompSmoothMotionMath.h
   RecompMenu.cpp
   RecompMenu.h
   RecompGameData.cpp

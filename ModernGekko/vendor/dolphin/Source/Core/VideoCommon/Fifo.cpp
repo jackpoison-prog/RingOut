@@ -30,6 +30,7 @@
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OpcodeDecoding.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoBackendBase.h"
@@ -295,6 +296,8 @@ void FifoManager::ResetVideoBuffer()
 // Purpose: Keep the Core HW updated about the CPU-GPU distance
 void FifoManager::RunGpuLoop()
 {
+  // Smooth Motion presents once per display refresh from this loop.
+  RecompSmoothMotion::StartPacer(&m_gpu_mainloop);
   m_gpu_mainloop.Run(
       [this] {
         // Run events from the CPU thread.
@@ -303,6 +306,8 @@ void FifoManager::RunGpuLoop()
         // Do nothing while paused
         if (!m_emu_running_state.IsSet())
           return;
+
+        RecompSmoothMotion::Service();
 
         if (m_use_deterministic_gpu_thread)
         {
@@ -315,6 +320,7 @@ void FifoManager::RunGpuLoop()
             m_video_buffer_read_ptr =
                 OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
             m_video_buffer_seen_ptr = write_ptr;
+            RecompSmoothMotion::Service();
           }
         }
         else
@@ -404,6 +410,7 @@ void FifoManager::RunGpuLoop()
             }
 
             command_processor.SetCPStatusFromGPU();
+            RecompSmoothMotion::Service();
 
             if (m_config_sync_gpu)
             {
@@ -438,6 +445,7 @@ void FifoManager::RunGpuLoop()
         }
       },
       100);
+  RecompSmoothMotion::StopPacer();
 }
 
 void FifoManager::FlushGpu()

@@ -20,6 +20,7 @@
 
 #include "VideoCommon/AbstractGfx.h"
 #include "VideoCommon/BPFunctions.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/DriverDetails.h"
 #include "VideoCommon/Fifo.h"
@@ -51,6 +52,7 @@ void UpdateActiveConfig()
 {
   g_ActiveConfig = g_Config;
   g_ActiveConfig.bVSyncActive = IsVSyncActive(g_ActiveConfig.bVSync);
+  g_ActiveConfig.bSmoothMotionActive = RecompSmoothMotion::Active();
 }
 
 void VideoConfig::Refresh()
@@ -299,6 +301,7 @@ void CheckForConfigChanges()
   const int old_efb_access_tile_size = g_ActiveConfig.iEFBAccessTileSize;
   const auto old_texture_filtering_mode = g_ActiveConfig.texture_filtering_mode;
   const bool old_vsync = g_ActiveConfig.bVSyncActive;
+  const bool old_smooth = g_ActiveConfig.bSmoothMotionActive;
   const bool old_bbox = g_ActiveConfig.bBBoxEnable;
   const int old_efb_scale = g_ActiveConfig.iEFBScale;
   const u32 old_game_mod_changes =
@@ -347,7 +350,9 @@ void CheckForConfigChanges()
     changed_bits |= CONFIG_CHANGE_BIT_ANISOTROPY;
   if (old_texture_filtering_mode != g_ActiveConfig.texture_filtering_mode)
     changed_bits |= CONFIG_CHANGE_BIT_FORCE_TEXTURE_FILTERING;
-  if (old_vsync != g_ActiveConfig.bVSyncActive)
+  // A Smooth Motion change also changes the present mode (VKSwapChain).
+  if (old_vsync != g_ActiveConfig.bVSyncActive ||
+      old_smooth != g_ActiveConfig.bSmoothMotionActive)
     changed_bits |= CONFIG_CHANGE_BIT_VSYNC;
   if (old_bbox != g_ActiveConfig.bBBoxEnable)
     changed_bits |= CONFIG_CHANGE_BIT_BBOX;
@@ -367,6 +372,10 @@ void CheckForConfigChanges()
   // No changes?
   if (changed_bits == 0)
     return;
+
+  // Smooth Motion's recorded frames hold pipelines and EFB-sized state that a
+  // real change may destroy. Not on every call: this runs after every frame.
+  RecompSmoothMotion::Reset();
 
   float old_scale = g_framebuffer_manager->GetEFBScale();
 

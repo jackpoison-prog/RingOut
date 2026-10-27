@@ -1,0 +1,47 @@
+#!/bin/bash
+# Ring Out : add the game to your Steam library, once, in Desktop Mode.
+#
+# Then it is in Game Mode with Steam Input like any other game. Steam must be
+# running.
+HERE="$(dirname "$(readlink -f "$0")")"
+GAME="$HERE/RingOut"
+
+# Double-clicked in the file manager there is no terminal, so the result goes
+# in a dialog as well -- otherwise "Steam is not running" is never seen and
+# the player thinks it worked.
+say() {
+    echo "$1"
+    if [ ! -t 1 ] && [ -n "${DISPLAY}${WAYLAND_DISPLAY}" ] && command -v kdialog >/dev/null; then
+        kdialog --title "Ring Out" --msgbox "$1" >/dev/null 2>&1 || true
+    fi
+}
+
+if ! pgrep -x steam >/dev/null; then
+    say "Steam is not running. Start Steam (Desktop Mode) and run this again."
+    exit 1
+fi
+
+# Steam adds a twin every time it is asked, so ask only once.
+if grep -qaF "\"$GAME\"" "$HOME"/.steam/steam/userdata/*/config/shortcuts.vdf 2>/dev/null; then
+    say "RingOut is already in your Steam library (under Non-Steam)."
+    exit 0
+fi
+
+# The request steamos-add-to-steam makes, sent directly: that wrapper only
+# accepts application/x-shellscript, KDE types our launcher text/x-shellscript,
+# and it then prints "Unsupported file type" and exits 0 (seen on a Deck,
+# 2026-10-25). Steam deletes the flag file once it has taken the request.
+touch /tmp/addnonsteamgamefile
+steam "steam://addnonsteamgame/$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$GAME")" >/dev/null 2>&1 &
+for _ in $(seq 20); do
+    [ -e /tmp/addnonsteamgamefile ] || break
+    sleep 0.5
+done
+if [ -e /tmp/addnonsteamgamefile ]; then
+    rm -f /tmp/addnonsteamgamefile
+    say "Steam did not answer. Make sure Steam is open (Desktop Mode) and run this again."
+    exit 1
+fi
+say "Asked Steam to add RingOut. It appears in your library under Non-Steam;
+set its icon in its Properties if you like."
+exit 0

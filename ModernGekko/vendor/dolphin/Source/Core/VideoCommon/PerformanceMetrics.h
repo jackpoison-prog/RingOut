@@ -30,6 +30,9 @@ public:
 
   void CountFrame();
   void CountVBlank();
+  // Every picture sent to the screen. With Smooth Motion that is one per
+  // display refresh, not one per game frame.
+  void CountPresent();
 
   // Call from CPU thread.
   void CountThrottleSleep(DT sleep);
@@ -52,6 +55,7 @@ public:
 private:
   PerformanceTracker m_fps_counter{"render_times.txt"};
   PerformanceTracker m_vps_counter{"vblank_times.txt"};
+  PerformanceTracker m_present_counter{"present_times.txt"};
 
   double m_graph_max_time = 0.0;
 

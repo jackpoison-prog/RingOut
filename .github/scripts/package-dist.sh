@@ -95,6 +95,7 @@ install -m 755 "$SRC/tools/dolrecomp"     "$STAGE/tools/dolrecomp"
 # rather than a second copy that drifts -- this project has been bitten by
 # exactly that with dolrecomp-src.
 install -m 755 "$REPO/dist/shared/gc-art.py" "$STAGE/tools/gc-art.py"
+install -m 755 "$REPO/dist/shared/steam_shortcut.py" "$STAGE/tools/steam_shortcut.py"
 # The route setup.sh --pgo plays to train a profile. Sourced from the same file
 # every perf A/B in this project used, so the profile is trained on the workload
 # the numbers were measured on -- a second copy would drift and nobody would

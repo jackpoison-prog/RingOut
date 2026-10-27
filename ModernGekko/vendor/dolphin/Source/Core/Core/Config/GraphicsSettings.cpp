@@ -14,6 +14,9 @@ namespace Config
 // Graphics.Hardware
 
 const Info<bool> GFX_VSYNC{{System::GFX, "Hardware", "VSync"}, false};
+const Info<bool> GFX_SMOOTH_MOTION{{System::GFX, "Hardware", "SmoothMotion"}, false};
+const Info<int> GFX_SMOOTH_MOTION_REFRESH_HZ{{System::GFX, "Hardware", "SmoothMotionRefreshHz"},
+                                             0};
 const Info<int> GFX_ADAPTER{{System::GFX, "Hardware", "Adapter"}, 0};
 
 // Graphics.Settings

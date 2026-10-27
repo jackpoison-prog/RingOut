@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "Core/RecompScreenShape.h"
+
 namespace Core
 {
 class System;
@@ -33,6 +35,22 @@ bool IsEnabled();
 // Returns false, changing nothing, when it would have to write guest memory
 // during netplay or a replay -- either would desync.
 bool Toggle();
+
+// The screen shape the player chose (meaningful only while widescreen is on).
+RecompScreenShape::Shape GetShape();
+
+// True when this disc and build have a constant table (RecompScreenShape.h):
+// false for unmapped discs, and for a build whose constants did not match.
+bool ShapesAvailable();
+
+// Host thread. Steps the shape by direction (+1/-1, wrapping); OnFrame applies
+// it on the next frame. Returns false, changing nothing, when shapes are not
+// available or guest writes are not allowed (netplay, a replay).
+bool CycleShape(int direction);
+
+// CPU thread: the movie player converted a frame. While movies play the
+// display shows 16:9 whatever the shape (RecompScreenShape::MovieGate).
+void NoteMovieFrame();
 
 // CPU thread, once per emulated frame.
 void OnFrame(Core::System& system);

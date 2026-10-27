@@ -31,6 +31,7 @@
 #include "VideoCommon/PixelEngine.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/Present.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/TMEM.h"
 #include "VideoCommon/TextureCacheBase.h"
@@ -350,6 +351,7 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
         // render multiple sub-frames and arrange the XFB copies in next to each-other in main
         // memory so they form a single completed XFB. See
         // https://dolphin-emu.org/blog/2017/11/19/hybridxfb/ for examples and more detail.
+        RecompSmoothMotion::EndFrame(srcRect);
         system.GetVideoEvents().after_frame_event.Trigger(system);
 
         // Note: Theoretically, in the future we could track the VI configuration and try to detect

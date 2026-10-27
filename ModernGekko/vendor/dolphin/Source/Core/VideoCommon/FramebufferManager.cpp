@@ -22,6 +22,7 @@
 #include "VideoCommon/FramebufferShaderGen.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/Present.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
@@ -880,6 +881,7 @@ void FramebufferManager::ClearEFB(const MathUtil::Rectangle<int>& rc, bool color
   }
 
   g_gfx->ClearRegion(target_rc, color_enable, alpha_enable, z_enable, color, z);
+  RecompSmoothMotion::RecordClear(target_rc, color_enable, alpha_enable, z_enable, color, z);
 }
 
 bool FramebufferManager::CompileClearPipelines()

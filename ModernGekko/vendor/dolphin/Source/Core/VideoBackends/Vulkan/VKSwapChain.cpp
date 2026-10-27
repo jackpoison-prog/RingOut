@@ -12,6 +12,7 @@
 #include "Common/MsgHandler.h"
 #include "Common/Config/Config.h"
 #include "Core/Config/MainSettings.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 #include "VideoBackends/Vulkan/ObjectCache.h"
@@ -267,6 +268,23 @@ bool SwapChain::SelectPresentMode()
   res = vkGetPhysicalDeviceSurfacePresentModesKHR(g_vulkan_context->GetPhysicalDevice(), m_surface,
                                                   &mode_count, present_modes.data());
   ASSERT(res == VK_SUCCESS);
+
+  // Smooth Motion presents from the GPU thread once per refresh, so a present
+  // must never block it: MAILBOX shows the newest image at each vblank without
+  // waiting. IMMEDIATE (tearing) when that is missing. This outranks V-Sync.
+  if (RecompSmoothMotion::Active())
+  {
+    for (const VkPresentModeKHR mode : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR})
+    {
+      if (Common::Contains(present_modes, mode))
+      {
+        m_present_mode = mode;
+        INFO_LOG_FMT(VIDEO, "Smooth Motion: present mode {}",
+                     mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "immediate");
+        return true;
+      }
+    }
+  }
 
   // If vsync is enabled, use VK_PRESENT_MODE_FIFO_KHR.
   // This check should not fail with conforming drivers, as the FIFO present mode is mandated by
@@ -561,6 +579,16 @@ bool SwapChain::SetVSync(bool enabled)
 
   // Recreate the swap chain with the new present mode.
   m_vsync_enabled = enabled;
+  return RecreateSwapChain();
+}
+
+bool SwapChain::RefreshPresentMode()
+{
+  const VkPresentModeKHR old_mode = m_present_mode;
+  if (!SelectPresentMode())
+    return false;
+  if (m_present_mode == old_mode)
+    return true;
   return RecreateSwapChain();
 }
 

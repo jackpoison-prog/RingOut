@@ -18,7 +18,9 @@
 #include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OnScreenUI.h"
+#include "VideoCommon/PerformanceMetrics.h"
 #include "VideoCommon/PostProcessing.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
@@ -210,7 +212,14 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
 
   video_events.before_present_event.Trigger(present_info);
 
-  if (!is_duplicate || !g_ActiveConfig.bSkipPresentingDuplicateXFBs)
+  if (RecompSmoothMotion::Pacing())
+  {
+    // Smooth Motion presents once per display refresh from the GPU loop
+    // (its frame clock runs from the XFB copy, RecompSmoothMotion::EndFrame).
+    ProcessFrameDumping(ticks);
+    video_events.after_present_event.Trigger(present_info);
+  }
+  else if (!is_duplicate || !g_ActiveConfig.bSkipPresentingDuplicateXFBs)
   {
     Present(&present_info);
     ProcessFrameDumping(ticks);
@@ -899,7 +908,8 @@ void Presenter::RenderXFBToScreen(const MathUtil::Rectangle<int>& target_rc,
   }
 }
 
-void Presenter::Present(PresentInfo* present_info)
+void Presenter::Present(PresentInfo* present_info, const AbstractTexture* xfb_override,
+                        const MathUtil::Rectangle<int>* override_rc)
 {
   // See m_present_call_mutex: the settings overlay presents from the host
   // thread while paused, so Present can be entered concurrently.
@@ -937,14 +947,16 @@ void Presenter::Present(PresentInfo* present_info)
   const bool backbuffer_bound = g_gfx->BindBackbuffer({{0.0f, 0.0f, 0.0f, 1.0f}});
 
   // Render the XFB to the screen.
-  if (backbuffer_bound && m_xfb_entry)
+  if (backbuffer_bound && (m_xfb_entry || xfb_override))
   {
     // Adjust the source rectangle instead of using an oversized viewport to render the XFB.
     MathUtil::Rectangle<int> render_target_rc = GetTargetRectangle();
-    MathUtil::Rectangle<int> render_source_rc = AdjustForCustomCrop(m_xfb_rect);
+    MathUtil::Rectangle<int> render_source_rc =
+        AdjustForCustomCrop(xfb_override ? *override_rc : m_xfb_rect);
     AdjustRectanglesToFitBounds(&render_target_rc, &render_source_rc, m_backbuffer_width,
                                 m_backbuffer_height);
-    RenderXFBToScreen(render_target_rc, m_xfb_entry->texture.get(), render_source_rc);
+    RenderXFBToScreen(render_target_rc,
+                      xfb_override ? xfb_override : m_xfb_entry->texture.get(), render_source_rc);
   }
 
   if (m_onscreen_ui)
@@ -970,6 +982,8 @@ void Presenter::Present(PresentInfo* present_info)
     }
 
     g_gfx->PresentBackbuffer();
+    RecompSmoothMotion::NotePresent();
+    Core::System::GetInstance().GetPerfMetrics().CountPresent();
   }
 
   if (m_xfb_entry)
@@ -984,6 +998,63 @@ void Presenter::Present(PresentInfo* present_info)
     m_onscreen_ui->BeginImGuiFrame(m_backbuffer_width, m_backbuffer_height);
 
   g_gfx->EndUtilityDrawing();
+}
+
+void Presenter::PresentSmooth(float alpha)
+{
+  if (g_gfx->IsHeadless())
+    return;
+  // Render() draws with the vertex loader's buffer; close the open batch first.
+  g_vertex_manager->Flush();
+  MathUtil::Rectangle<int> rc;
+  g_gfx->BeginUtilityDrawing();
+  const AbstractTexture* blended = RecompSmoothMotion::Render(alpha, &rc);
+  g_gfx->EndUtilityDrawing();
+  // RINGOUT_SMOOTH_DUMP=<dir>: save 40 blended pictures from present
+  // RINGOUT_SMOOTH_DUMP_AT (a diagnostic; the screen grabbers see nothing here).
+  static const char* dump_dir = std::getenv("RINGOUT_SMOOTH_DUMP");
+  static const long dump_at = [] {
+    const char* v = std::getenv("RINGOUT_SMOOTH_DUMP_AT");
+    return v ? std::atol(v) : 0L;
+  }();
+  // RINGOUT_SMOOTH_DUMP_N / _EVERY: how many, and every how many presents.
+  static const size_t dump_n = [] {
+    const char* v = std::getenv("RINGOUT_SMOOTH_DUMP_N");
+    return v ? static_cast<size_t>(std::atol(v)) : size_t{40};
+  }();
+  static const long dump_every = [] {
+    const char* v = std::getenv("RINGOUT_SMOOTH_DUMP_EVERY");
+    return v ? std::max(1L, std::atol(v)) : 1L;
+  }();
+  static long present_no = 0;
+  // Copied on the GPU and saved at the end: saving each one stalls the game,
+  // and every picture after a stall is alpha 1.
+  static std::vector<std::pair<std::unique_ptr<AbstractTexture>, std::string>> dumps;
+  // RINGOUT_SMOOTH_DUMP_REAL=1: save the game's own last frame instead.
+  static const bool dump_real = std::getenv("RINGOUT_SMOOTH_DUMP_REAL") != nullptr;
+  const AbstractTexture* dump_src =
+      dump_real ? (m_xfb_entry ? m_xfb_entry->texture.get() : nullptr) : blended;
+  if (dump_dir && blended && dump_src && present_no >= dump_at &&
+      (present_no - dump_at) % dump_every == 0 && dumps.size() < dump_n)
+  {
+    TextureConfig cfg = dump_src->GetConfig();
+    cfg.flags = 0;
+    cfg.levels = 1;
+    cfg.layers = 1;
+    auto copy = g_gfx->CreateTexture(cfg);
+    copy->CopyRectangleFromTexture(dump_src, cfg.GetRect(), 0, 0, cfg.GetRect(), 0, 0);
+    dumps.emplace_back(std::move(copy),
+                       fmt::format("{}/p{:06}-f{:05}-a{:.2f}.png", dump_dir, present_no,
+                                   RecompSmoothMotion::FramesEnded(), alpha));
+    if (dumps.size() == dump_n)
+    {
+      for (auto& [tex, name] : dumps)
+        tex->Save(name, 0);
+    }
+  }
+  ++present_no;
+  // nullptr: no pair of frames, a scene cut, or alpha 1 -- the real XFB.
+  Present(nullptr, blended, blended ? &rc : nullptr);
 }
 
 TimePoint Presenter::GetUpdatedPresentationTime(TimePoint intended_presentation_time)

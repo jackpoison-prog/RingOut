@@ -5,10 +5,13 @@
 # game-derived ships with this package -- this script extracts the disc and
 # recompiles its executable here, on your machine.
 #
-# Usage:  ./setup.sh [--deck] [--pgo] [-y] /path/to/your/disc.iso
+# Usage:  ./setup.sh [--deck] [--pgo] [-y] [--add-to-steam|--no-steam] /path/to/your/disc.iso
 #
 #   --deck   build a module that will also run on a Steam Deck, which you then
 #            copy into the Deck package. See "THE DECK BUILD" below.
+#   --add-to-steam  add Ring Out to Steam at the end without asking (closing
+#                   and restarting Steam if it is running).
+#   --no-steam      do not offer it. -y alone never touches Steam either.
 set -euo pipefail
 
 HERE="$(dirname "$(readlink -f "$0")")"
@@ -34,11 +37,14 @@ DECK=0
 ISO=""
 PGO=0
 ASSUME_YES=0
+STEAM=ask
 for arg in "$@"; do
     case "$arg" in
         --deck) DECK=1 ;;
         --pgo)  PGO=1 ;;
         -y|--yes) ASSUME_YES=1 ;;
+        --add-to-steam) STEAM=yes ;;
+        --no-steam)     STEAM=no ;;
         *)      [ -z "$ISO" ] && ISO="$arg" ;;
     esac
 done
@@ -1061,6 +1067,40 @@ Categories=Game;
 DESKTOP
     chmod +x "$HERE/RingOut.desktop"
     echo "    RingOut.desktop -> $(basename "$ICON")"
+fi
+
+# Steam, last, because it may close and restart the player's Steam. Only ever
+# on a yes: -y means "do not stop to ask", which is how the release gates and
+# CI run this, and a scripted build must never edit someone's Steam library.
+# The helper prints one line for every outcome and a failure here is never a
+# failed setup.
+if [ "$DECK" = 1 ]; then
+    if [ "$STEAM" != no ]; then
+        echo "==> Steam"
+        echo "    skipped (--deck): on the Deck, run \"Add to Steam\" in the Deck folder."
+    fi
+elif [ "$STEAM" = yes ] || { [ "$STEAM" = ask ] && [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; }; then
+    echo "==> Steam"
+    if python3 "$HERE/tools/steam_shortcut.py" find >/dev/null 2>&1; then
+        _answer=y
+        if [ "$STEAM" = ask ]; then
+            # Asked once, here: the helper is then told --yes, so it never asks
+            # a second question through the pipe below, where it would be invisible.
+            printf "  Add Ring Out to Steam? (if Steam is open it is closed and restarted) [Y/n] "
+            read -r _answer || _answer=n
+        fi
+        case "$_answer" in
+            [Nn]*) echo "    skipped." ;;
+            *)
+                STEAM_ARGS=(--exe "$HERE/RingOut" --start-dir "$HERE" --name "Soul Calibur 2")
+                [ -f "$HERE/art/icon.png" ] && STEAM_ARGS+=(--icon "$HERE/art/icon.png")
+                STEAM_ARGS+=(--yes)
+                python3 "$HERE/tools/steam_shortcut.py" add "${STEAM_ARGS[@]}" | sed 's/^/    /' || true
+                ;;
+        esac
+    else
+        echo "    Steam not found -- skipped."
+    fi
 fi
 
 # THE PROFILE VERDICT, said once, at the end, where it cannot be scrolled past.

@@ -197,6 +197,8 @@ struct VideoConfig final
   // General
   bool bVSync = false;
   bool bVSyncActive = false;
+  // Smooth Motion is on and offered; it picks its own present mode.
+  bool bSmoothMotionActive = false;
   bool bWidescreenHack = false;
   AspectMode aspect_mode{};
   int custom_aspect_width = 1;

@@ -158,11 +158,13 @@ jobs:
           Get-ChildItem staging
 
       - name: Check binaries for the build path
-        # The binaries ship publicly; this repo is private. Its name must not appear in them, as ASCII
-        # or as UTF-16 (MSVC's wide __FILE__ in asserts), whatever the configure flags above do.
+        # The binaries ship publicly; this repo is private. The runner's checkout path (D:\a\<repo>\<repo>)
+        # must not appear in them, as ASCII or as UTF-16 (MSVC's wide __FILE__ in asserts), whatever the
+        # configure flags above do. The doubled name is the path's signature: a fork named "RingOut" must not
+        # trip on the exe's own "RingOut Ver" string.
         shell: pwsh
         run: |
-          $name = '${{ github.event.repository.name }}'
+          $name = '${{ github.event.repository.name }}'; $name = "$name\$name"
           $bad = 0
           foreach ($f in Get-ChildItem staging -Filter *.exe) {
             $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes($f.FullName))

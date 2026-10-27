@@ -61,6 +61,11 @@ public:
   // Change vsync enabled state. This may fail as it causes a swapchain recreation.
   bool SetVSync(bool enabled);
 
+  // Picks the present mode again and recreates the swap chain if it changed:
+  // Smooth Motion's mode follows the option and the monitor's refresh, which
+  // V-Sync's own flag does not see.
+  bool RefreshPresentMode();
+
   // Is exclusive fullscreen supported?
   bool IsFullscreenSupported() const { return m_fullscreen_supported; }
 

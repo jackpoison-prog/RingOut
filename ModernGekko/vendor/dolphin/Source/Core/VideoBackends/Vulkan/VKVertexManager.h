@@ -48,6 +48,10 @@ protected:
   void UploadAllConstants();
 
   std::unique_ptr<StreamBuffer> m_vertex_stream_buffer;
+  // Smooth Motion: the batch's CPU copy while it records (see ResetBuffer).
+  std::vector<u8> m_staging_vertices;
+  std::vector<u16> m_staging_indices;
+  bool m_staging = false;
   std::unique_ptr<StreamBuffer> m_index_stream_buffer;
   std::unique_ptr<StreamBuffer> m_uniform_stream_buffer;
   std::unique_ptr<StreamBuffer> m_texel_stream_buffer;

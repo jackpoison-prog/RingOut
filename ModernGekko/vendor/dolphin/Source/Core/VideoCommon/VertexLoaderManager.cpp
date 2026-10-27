@@ -4,6 +4,7 @@
 #include "VideoCommon/VertexLoaderManager.h"
 
 #include <algorithm>
+#include <cstring>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/NativeVertexFormat.h"
+#include "VideoCommon/RecompOrthoSqueeze.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexLoaderBase.h"
 #include "VideoCommon/VertexManagerBase.h"
@@ -395,6 +397,42 @@ static bool CanSplit(OpcodeDecoder::Primitive primitive)
   }
 }
 
+// Screen shape: the x extent, in clip space before any squeeze, of an
+// orthographic draw, so a full-screen overlay can be told from the HUD. Loads
+// the vertices into scratch first -- the batch they would join must be flushed
+// before the exemption changes. Positions come out of the loader as floats,
+// after a u32 matrix index when the format carries one (as CPUCull reads them).
+static bool OrthoDrawCoversFullWidth(VertexLoaderBase* loader, const u8* src, int count)
+{
+  static std::vector<u8> scratch;
+  const u32 stride = loader->m_native_vtx_decl.stride;
+  scratch.resize(static_cast<size_t>(count) * stride + 16);
+  const int loaded = loader->RunVertices(src, scratch.data(), count);
+  const bool has_z = loader->m_native_vtx_decl.position.components >= 3;
+  const bool per_vertex_mtx = loader->m_native_vtx_decl.posmtx.enable;
+  const u32 default_idx = g_main_cp_state.matrix_index_a.PosNormalMtxIdx & 0x3f;
+  const auto& raw = xfmem.projection.rawProjection;
+  float lo = 1e30f, hi = -1e30f;
+  for (int i = 0; i < loaded; ++i)
+  {
+    const u8* v = scratch.data() + static_cast<size_t>(i) * stride;
+    u32 idx = default_idx;
+    if (per_vertex_mtx)
+    {
+      idx = v[0] & 0x3f;
+      v += sizeof(u32);
+    }
+    float p[3] = {0.f, 0.f, 0.f};
+    std::memcpy(p, v, (has_z ? 3 : 2) * sizeof(float));
+    const float* row = &xfmem.posMatrices[idx * 4];
+    const float view_x = row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3];
+    const float clip_x = raw[0] * view_x + raw[1];
+    lo = std::min(lo, clip_x);
+    hi = std::max(hi, clip_x);
+  }
+  return loaded > 0 && RecompOrthoSqueeze::CoversFullWidth(lo, hi);
+}
+
 template <bool IsPreprocess>
 int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int count, const u8* src)
 {
@@ -429,6 +467,18 @@ int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int coun
       auto& vertex_shader_manager = system.GetVertexShaderManager();
       vertex_shader_manager.SetVertexFormat(loader->m_native_components,
                                             loader->m_native_vertex_format->GetVertexDeclaration());
+    }
+
+    // Screen shape: a full-screen 2D overlay keeps the whole width while the
+    // HUD around it is narrowed to 16:9 (RecompOrthoSqueeze.h).
+    {
+      auto& vsm = Core::System::GetInstance().GetVertexShaderManager();
+      const bool full = vsm.OrthoSqueezeWouldApply() && OrthoDrawCoversFullWidth(loader, src, count);
+      if (full != vsm.IsOrthoFullWidth())
+      {
+        g_vertex_manager->Flush();
+        vsm.SetOrthoFullWidth(full);
+      }
     }
 
     // CPUCull's performance increase comes from encoding fewer GPU commands, not sending less data

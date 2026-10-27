@@ -411,6 +411,7 @@ void VKGfx::OnConfigChanged(u32 bits)
   {
     ExecuteCommandBuffer(false, true);
     m_swap_chain->SetVSync(g_ActiveConfig.bVSyncActive);
+    m_swap_chain->RefreshPresentMode();
   }
 
   // For quad-buffered stereo we need to change the layer count, so recreate the swap chain.

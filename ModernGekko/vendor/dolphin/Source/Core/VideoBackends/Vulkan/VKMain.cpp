@@ -16,6 +16,7 @@
 #include "VideoBackends/Vulkan/VKVertexManager.h"
 #include "VideoBackends/Vulkan/VulkanContext.h"
 
+#include "VideoCommon/RecompDisplayRefresh.h"
 #include "VideoCommon/TextureCacheBase.h"
 #include "VideoCommon/VideoConfig.h"
 
@@ -90,6 +91,8 @@ static bool ShouldEnableDebugUtils(bool enable_validation_layers)
 
 bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
 {
+  RecompDisplayRefresh::SetWindow(wsi);
+
   if (!LoadVulkanLibrary())
   {
     PanicAlertFmt("Failed to load Vulkan library.");
@@ -204,6 +207,13 @@ bool VideoBackend::Initialize(const WindowSystemInfo& wsi)
     if (!swap_chain)
     {
       PanicAlertFmt("Failed to create Vulkan swap chain.");
+      // Shutdown() destroys the object cache, whose stream buffer and dummy texture hand their
+      // destruction to the command buffer manager and state tracker -- neither of which exists
+      // yet, so it segfaulted (RingOut#16). Create both surfaceless, as a headless run does, so
+      // the teardown has somewhere to go; if even that fails, leak the cache rather than crash.
+      g_command_buffer_mgr = std::make_unique<CommandBufferManager>(false);
+      if (!g_command_buffer_mgr->Initialize(0) || !StateTracker::CreateInstance())
+        static_cast<void>(g_object_cache.release());
       Shutdown();
       return false;
     }

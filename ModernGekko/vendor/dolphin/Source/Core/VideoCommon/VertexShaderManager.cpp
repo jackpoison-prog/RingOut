@@ -17,6 +17,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/FreeLookCamera.h"
+#include "VideoCommon/RecompOrthoSqueeze.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModActionData.h"
 #include "VideoCommon/GraphicsModSystem/Runtime/GraphicsModManager.h"
 #include "VideoCommon/Statistics.h"
@@ -38,9 +39,34 @@ void VertexShaderManager::Init()
   dirty = true;
 }
 
+// Only full-width 2D is the screen's: a narrower viewport is the game drawing
+// into part of the EFB for a copy (a texture), which must keep its layout.
+// The factor for whatever the projection is now: 1 for a draw into part of
+// the EFB, and for a 2D draw that spans the whole width (a fade, a bar).
+static float ShapeFactorForViewport()
+{
+  if (std::fabs(2.f * xfmem.viewport.wd) < EFB_WIDTH - 8)
+    return 1.0f;
+  return RecompOrthoSqueeze::g_factor.load(std::memory_order_relaxed);
+}
+
+bool VertexShaderManager::OrthoSqueezeWouldApply() const
+{
+  return xfmem.projection.type == ProjectionType::Orthographic &&
+         ShapeFactorForViewport() != 1.0f;
+}
+
+float VertexShaderManager::OrthoSqueezeNow() const
+{
+  if (xfmem.projection.type == ProjectionType::Orthographic && m_ortho_full_width)
+    return 1.0f;
+  return ShapeFactorForViewport();
+}
+
 Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 {
   const auto& rawProjection = xfmem.projection.rawProjection;
+  m_ortho_squeeze_loaded = OrthoSqueezeNow();  // 1 unless a wide screen shape
 
   switch (xfmem.projection.type)
   {
@@ -106,6 +132,12 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
     ERROR_LOG_FMT(VIDEO, "Unknown projection type: {}", xfmem.projection.type);
   }
 
+  // A wide screen shape keeps the game's 2D -- and 3D the game placed beside
+  // it -- at 16:9 in the middle (RecompOrthoSqueeze.h).
+  RecompOrthoSqueeze::ApplyToProjection(
+      m_projection_matrix.data(), xfmem.projection.type == ProjectionType::Orthographic,
+      m_ortho_squeeze_loaded);
+
   PRIM_LOG("Projection: {} {} {} {} {} {}", rawProjection[0], rawProjection[1], rawProjection[2],
            rawProjection[3], rawProjection[4], rawProjection[5]);
 
@@ -121,7 +153,8 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 
 void VertexShaderManager::SetProjectionMatrix(XFStateManager& xf_state_manager)
 {
-  if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty())
+  if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty() ||
+      OrthoSqueezeNow() != m_ortho_squeeze_loaded)
   {
     xf_state_manager.ResetProjection();
     auto corrected_matrix = LoadProjectionMatrix();
@@ -412,7 +445,8 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
   }
 
   if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty() ||
-      !projection_actions.empty() || m_projection_graphics_mod_change)
+      !projection_actions.empty() || m_projection_graphics_mod_change ||
+      OrthoSqueezeNow() != m_ortho_squeeze_loaded)
   {
     xf_state_manager.ResetProjection();
     m_projection_graphics_mod_change = !projection_actions.empty();

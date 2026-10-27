@@ -85,7 +85,12 @@ PATTERNS_ALWAYS=(
   # collide with upstream binary data, so it is worth checking the binaries for
   # too. (This said PATTERNS_TEXT was dead code, which it was when written --
   # declared and never read. It is wired in now, below.)
-  'jackpoison-prog/RingOutRecomp'
+  #
+  # The BARE name, not "<org>/<name>": every Windows exe from 1.6 to the first
+  # 1.6.10 build carried 462 copies of the CI checkout path D:\a\<name>\<name>\
+  # (MSVC-style __FILE__), with no org in front, so the org-qualified pattern
+  # passed all of them. One more copy is UTF-16, hence the -el pass below.
+  'RingOutRecomp'
 )
 # TEXT ONLY: in a config file a private address is the user's own network and a
 # PEM header is a real key. In the runtime binary both are upstream Dolphin
@@ -217,6 +222,23 @@ while IFS= read -r f; do
       hits=1
     fi
   done
+
+  # UTF-16LE strings, which `strings -a` cannot see: Windows binaries keep wide
+  # paths (wide __FILE__ in asserts, resource strings). The ALWAYS set only --
+  # these are the patterns that mean the builder's data in a binary.
+  case "$f" in
+    *.exe|*.dll|*.pdb|*.pgd)
+      for p in "${PATTERNS_ALWAYS[@]}" ${BUILD_ROOT_RE:+"$BUILD_ROOT_RE"}; do
+        m="$(strings -a -el "$f" 2>/dev/null | grep -aE "$p" | grep -avE "$ALLOW" |
+             grep -aEo "$p" | sort -u | head -3)"
+        if [ -n "$m" ]; then
+          echo "  FAIL: $(realpath --relative-to="$DIR" "$f" 2>/dev/null || echo "$f") (UTF-16)"
+          echo "$m" | sed 's/^/    /'
+          hits=1
+        fi
+      done
+      ;;
+  esac
 done < <(find "$DIR" -type f 2>/dev/null)
 [ "$hits" = 0 ] && echo "  none" || fail=1
 

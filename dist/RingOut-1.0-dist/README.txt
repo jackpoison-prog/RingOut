@@ -16,6 +16,11 @@ QUICK START
       ./setup.sh --deck /path/to/your/disc.iso    (module for a Steam Deck)
       ./setup.sh --pgo  /path/to/your/disc.iso    (see below -- 10-14% faster)
 
+  At the end, setup offers to add Ring Out to Steam (as a non-Steam game,
+  with the game's own icon), so it starts from Big Picture with Steam
+  Input. If Steam is running it asks to close and restart it first.
+  --add-to-steam does it without asking; --no-steam skips the question.
+
 WANT THE LAST 10-14%?  ./setup.sh --pgo
   A profile-guided build is worth 10-14% of CPU time -- measured over 6000
   fixed frames of an arcade match, 10.3% on a desktop and 14.1% on a Steam
@@ -81,8 +86,8 @@ ON A STEAM DECK?
 
       ./setup.sh --deck /path/to/your/disc.iso
 
-  then copy game/ and bin/g<ID>_recomp.so into the Deck package. Add its
-  RingOut launcher to Steam as a non-Steam game to run it from Game Mode.
+  then copy game/ and bin/g<ID>_recomp.so into the Deck package. In Desktop
+  Mode, run its "Add to Steam" to play it from Game Mode.
 
   Do not skip --deck. A normal build targets THIS machine, and on a Zen 4/5
   or recent Intel desktop that means instructions the Deck's Zen 2 cannot
@@ -110,10 +115,21 @@ CONTROLS
   Shift+Escape    quit
 
 SETTINGS MENU TABS
-  VIDEO     widescreen, internal resolution, aspect ratio, v-sync,
+  VIDEO     widescreen, screen shape, internal resolution, aspect ratio, v-sync,
             anti-aliasing, anisotropic + texture filtering,
             texture packs, show FPS, free camera, fullscreen
-  AUDIO     volume, mute, latency, fill audio gaps
+            Screen Shape (with Widescreen ON): 16:9, 16:10, 21:9 or
+            32:9 -- the 3D fills that shape. At 21:9 and 32:9 the menus
+            and HUD stay at 16:9 in the middle; movies always play at
+            16:9. Netplay and replays always run at 16:9, and so does
+            the Japanese disc.
+            Smooth Motion (Vulkan, on a screen faster than 60 Hz): one
+            picture per screen refresh, each blended between the game's
+            last two frames, so motion is smooth at 100/120/144 Hz. The
+            game itself still runs at 60. It costs input lag -- about
+            8 ms on average, up to one game frame -- so it is OFF by
+            default. On a 60 Hz screen the row does not appear.
+  AUDIO    volume, mute, latency, fill audio gaps
   SYSTEM    emulation speed, save/load state, quit
   CONTROLS  input backend and device at the top, then rebind any pad
             button (Space to rebind, Left to clear). Space on either of

@@ -7,6 +7,7 @@
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/CoreTiming.h"
+#include "Core/RecompWidescreen.h"
 #include "Core/HW/CPU.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
@@ -787,6 +788,7 @@ void StaticRecompCore::Run()
           {
             if (m_guest.pc == fmv.cnv_frm)  // mwPlyFxCnvFrmARGB(r3=hnd,r4=desc,r5=dst)
             {
+              RecompWidescreen::NoteMovieFrame();  // movies show at 16:9, not stretched
               // Replace the YUV->ARGB conversion: fill the destination buffer
               // natively and return to the caller, skipping the guest function.
               OnFmvCnvFrm(m_guest.gpr[3], m_guest.gpr[4], m_guest.gpr[5]);

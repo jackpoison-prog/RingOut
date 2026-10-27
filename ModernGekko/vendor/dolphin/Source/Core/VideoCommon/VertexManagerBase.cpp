@@ -34,6 +34,7 @@
 #include "VideoCommon/PerfQueryBase.h"
 #include "VideoCommon/PixelShaderGen.h"
 #include "VideoCommon/PixelShaderManager.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/TextureCacheBase.h"
 #include "VideoCommon/VertexLoaderManager.h"
@@ -660,6 +661,26 @@ void VertexManagerBase::Flush()
         }
         RenderDrawCall(pixel_shader_manager, geometry_shader_manager, custom_pixel_shader_contents,
                        custom_pixel_shader_uniforms, m_current_primitive_type, pipeline_object);
+        if (RecompSmoothMotion::Recording())
+        {
+          const auto& decl = VertexLoaderManager::GetCurrentVertexFormat()->GetVertexDeclaration();
+          const u32 num_vertices = m_index_generator.GetNumVerts();
+          const u32 stride = static_cast<u32>(decl.stride);
+          // The batch is the last num_vertices*stride bytes written; on Vulkan
+          // m_base_buffer_pointer is the start of the whole stream buffer.
+          RecompSmoothMotion::RecordDraw({
+              .pipeline = pipeline_object,
+              .primitive = m_current_primitive_type,
+              .vertices = m_cur_buffer_pointer - num_vertices * stride,
+              .num_vertices = num_vertices,
+              .stride = stride,
+              .indices = m_index_generator.GetIndexBase(),
+              .num_indices = num_indices,
+              .decl = &decl,
+              .used_textures = used_textures,
+              .samplers = &samplers,
+          });
+        }
       }
     }
 

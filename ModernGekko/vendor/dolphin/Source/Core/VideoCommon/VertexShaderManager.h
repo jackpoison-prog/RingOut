@@ -25,6 +25,13 @@ public:
 
   // constant management
   void SetProjectionMatrix(XFStateManager& xf_state_manager);
+
+  // Screen shape (RecompOrthoSqueeze.h): whether full-width 2D would be
+  // narrowed right now, and whether the draws being batched span the whole
+  // width and so are exempt. Changing the latter needs a flush first.
+  bool OrthoSqueezeWouldApply() const;
+  bool IsOrthoFullWidth() const { return m_ortho_full_width; }
+  void SetOrthoFullWidth(bool full) { m_ortho_full_width = full; }
   void SetConstants(std::span<const std::string> textures, XFStateManager& xf_state_manager);
 
   // data: 3 floats representing the X, Y and Z vertex model coordinates and the posmatrix index.
@@ -82,6 +89,11 @@ private:
 
   // track changes
   bool m_projection_graphics_mod_change = false;
+  // The 2D squeeze the loaded projection carries (RecompOrthoSqueeze.h), so a
+  // change of shape or of viewport reloads it.
+  float m_ortho_squeeze_loaded = 1.0f;
+  bool m_ortho_full_width = false;
+  float OrthoSqueezeNow() const;
 
   Common::Matrix44 LoadProjectionMatrix();
 };

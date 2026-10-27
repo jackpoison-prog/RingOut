@@ -314,6 +314,9 @@ public:
   static SamplerState GetSamplerState(u32 index, float custom_tex_scale, bool custom_tex,
                                       bool has_arbitrary_mips);
 
+  // The entry bound to a texture unit for the current draw (Smooth Motion holds it).
+  const RcTcacheEntry& GetBoundEntry(u32 unit) const { return m_bound_textures[unit]; }
+
 protected:
   // Decodes the specified data to the GPU texture specified by entry.
   // Returns false if the configuration is not supported.

@@ -58,6 +58,7 @@
 #include "VideoCommon/PixelEngine.h"
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/Present.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/Resources/CustomResourceManager.h"
 #include "VideoCommon/TMEM.h"
 #include "VideoCommon/TextureCacheBase.h"
@@ -379,6 +380,8 @@ void VideoBackendBase::ShutdownShared()
 
   g_frame_dumper.reset();
   g_presenter.reset();
+  // Holds texture cache entries and gfx textures.
+  RecompSmoothMotion::Shutdown();
 
   if (g_shader_cache)
     g_shader_cache->Shutdown();

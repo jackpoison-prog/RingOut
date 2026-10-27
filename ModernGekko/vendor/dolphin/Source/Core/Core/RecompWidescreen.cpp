@@ -3,6 +3,8 @@
 
 #include "Core/RecompWidescreen.h"
 
+#include <atomic>
+#include <optional>
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -13,6 +15,7 @@
 #include "Core/Movie.h"
 #include "Core/NetPlay/NetPlayProto.h"
 #include "Core/System.h"
+#include "VideoCommon/RecompOrthoSqueeze.h"
 #include "VideoCommon/VideoConfig.h"
 
 namespace Config
@@ -21,6 +24,8 @@ namespace Config
 // RingOut#10, and an install that saved it ON is migrated off it below.
 static const Info<bool> GFX_NATIVE_WIDESCREEN{{System::GFX, "Settings", "NativeWidescreen"},
                                               false};
+// RecompScreenShape::Shape as an int: 0 16:9, 1 16:10, 2 21:9 (64:27), 3 32:9.
+static const Info<int> GFX_SCREEN_SHAPE{{System::GFX, "Settings", "ScreenShape"}, 0};
 }  // namespace Config
 
 namespace RecompWidescreen
@@ -82,6 +87,23 @@ bool GuestWritesAllowed(Core::System& system)
   const auto& movie = system.GetMovie();
   return !NetPlay::IsNetPlayRunning() && !movie.IsRecordingInput() && !movie.IsPlayingInput();
 }
+
+// Set by OnFrame when this disc's constants held none of our shapes: a build
+// the table was not taken from. Host thread reads it for the menu.
+std::atomic<bool> s_foreign_build{false};
+
+// CPU thread only (the movie hook and OnFrame both run there).
+RecompScreenShape::MovieGate s_movie_gate;
+
+const RecompScreenShape::Table* FindShapeTable()
+{
+  return RecompScreenShape::FindTable(SConfig::GetInstance().GetGameID());
+}
+
+u32 ReadGuestU32(void* memory, u32 address)
+{
+  return static_cast<Memory::MemoryManager*>(memory)->Read_U32(address);
+}
 }  // namespace
 
 bool IsNative()
@@ -111,6 +133,33 @@ bool Toggle()
     return false;
   Config::SetBase(Config::GFX_NATIVE_WIDESCREEN, !Config::Get(Config::GFX_NATIVE_WIDESCREEN));
   return true;
+}
+
+RecompScreenShape::Shape GetShape()
+{
+  const int v = Config::Get(Config::GFX_SCREEN_SHAPE);
+  return v >= 0 && v < RecompScreenShape::kShapeCount ? static_cast<RecompScreenShape::Shape>(v) :
+                                                         RecompScreenShape::Shape::Wide16x9;
+}
+
+bool ShapesAvailable()
+{
+  return FindShapeTable() != nullptr && !s_foreign_build.load(std::memory_order_relaxed);
+}
+
+bool CycleShape(int direction)
+{
+  if (!ShapesAvailable() || !GuestWritesAllowed(Core::System::GetInstance()))
+    return false;
+  const int n = RecompScreenShape::kShapeCount;
+  const int next = ((static_cast<int>(GetShape()) + direction) % n + n) % n;
+  Config::SetBase(Config::GFX_SCREEN_SHAPE, next);
+  return true;
+}
+
+void NoteMovieFrame()
+{
+  s_movie_gate.Note();
 }
 
 void OnFrame(Core::System& system)
@@ -159,13 +208,61 @@ void OnFrame(Core::System& system)
     game_wide = want;
   }
 
-  // The display follows the GAME's flag, not the preference, so a replay or a
-  // netplay session recorded in the other mode still shows correctly. Only the
-  // two modes this manages are touched: a player who picked 4:3 or Stretch on
-  // the Aspect row keeps it.
+  // Screen shape: scale the wide-mode constants (RecompScreenShape.h). 4:3
+  // wants the originals back, so turning widescreen off undoes a shape.
+  using RecompScreenShape::Shape;
+  Shape shown = Shape::Wide16x9;
+  if (const RecompScreenShape::Table* table = FindShapeTable())
+  {
+    const std::optional<Shape> now =
+        RecompScreenShape::CurrentShape(*table, ReadGuestU32, &memory);
+    s_foreign_build.store(!now.has_value(), std::memory_order_relaxed);
+    if (now)
+    {
+      shown = *now;
+      const Shape want_shape = game_wide ? GetShape() : Shape::Wide16x9;
+      if (want_shape != *now && GuestWritesAllowed(system))
+      {
+        for (const RecompScreenShape::Write& w :
+             RecompScreenShape::Writes(*table, ReadGuestU32, &memory, want_shape))
+          memory.Write_U32(w.bits, w.address);
+        shown = want_shape;
+      }
+    }
+  }
+
+  // The display follows the GAME -- its flag and the constants in RAM -- not
+  // the preference, so a replay or a netplay session recorded in the other
+  // mode still shows correctly. Only the modes this manages are touched: a
+  // player who picked 4:3, Stretch or their own Custom ratio keeps it.
+  // A movie on screen shows at 16:9 with bars at the sides, not stretched.
+  // Display only: the constants in RAM keep the shape. Ticked every frame,
+  // managed or not, so the hold never goes stale.
+  const bool movie = s_movie_gate.Tick();
   const AspectMode aspect = Config::GetBase(Config::GFX_ASPECT_RATIO);
-  const AspectMode desired = game_wide ? AspectMode::ForceWide : AspectMode::Auto;
-  if ((aspect == AspectMode::Auto || aspect == AspectMode::ForceWide) && aspect != desired)
+  const int custom_w = Config::GetBase(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH);
+  const int custom_h = Config::GetBase(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT);
+  const bool managed = aspect == AspectMode::Auto || aspect == AspectMode::ForceWide ||
+                       (aspect == AspectMode::Custom &&
+                        RecompScreenShape::IsOurCustomAspect(custom_w, custom_h));
+  if (!managed)
+  {
+    RecompOrthoSqueeze::g_factor.store(1.0f, std::memory_order_relaxed);
+    return;
+  }
+  const std::optional<RecompScreenShape::AspectPair> pair =
+      game_wide && !movie ? RecompScreenShape::CustomAspect(shown) : std::nullopt;
+  // The 2D follows the display: narrowed only while it shows our shape.
+  RecompOrthoSqueeze::g_factor.store(pair ? RecompScreenShape::OrthoSqueeze(shown) : 1.0f,
+                                     std::memory_order_relaxed);
+  const AspectMode desired =
+      !game_wide ? AspectMode::Auto : pair ? AspectMode::Custom : AspectMode::ForceWide;
+  if (pair && (custom_w != pair->width || custom_h != pair->height))
+  {
+    Config::SetBase(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH, pair->width);
+    Config::SetBase(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT, pair->height);
+  }
+  if (aspect != desired)
     Config::SetBase(Config::GFX_ASPECT_RATIO, desired);
 }
 }  // namespace RecompWidescreen

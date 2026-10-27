@@ -4,13 +4,16 @@
 # game-derived ships with this package -- this script extracts the disc and
 # recompiles its executable here, on your machine.
 #
-# Usage:  .\setup.ps1 C:\path\to\your\disc.iso
+# Usage:  .\setup.ps1 C:\path\to\your\disc.iso [-AddToSteam | -NoSteam]
+#
+#   -AddToSteam  add Ring Out to Steam at the end without asking (closing and
+#                restarting Steam if it is running). -NoSteam: do not offer it.
 #
 # Unlike the Linux build, the toolchain is bundled: toolchain\ carries clang,
 # lld, cmake and ninja, so there is nothing for you to install.
 
 [CmdletBinding()]
-param([Parameter(Position = 0)][string]$Iso)
+param([Parameter(Position = 0)][string]$Iso, [switch]$AddToSteam, [switch]$NoSteam)
 
 $ErrorActionPreference = 'Stop'
 $Here  = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -448,6 +451,41 @@ if (-not $env:RINGOUT_NO_SHADER_WARMUP) {
             Write-Host "    (details, if any: userdata\shader-warmup.err.log)"
         }
     }
+}
+
+# Steam, last, because it may close and restart the player's Steam. Offered
+# only where someone can answer: the release gates run this over ssh with
+# input redirected, and a scripted build must never edit a Steam library. The
+# helper prints one line for every outcome, and its exit code is never ours.
+if (-not $NoSteam -and $Python -and ($AddToSteam -or -not [Console]::IsInputRedirected)) {
+    # Continue, not Stop: a line the helper writes to stderr must never abort a
+    # setup whose build has already succeeded.
+    $eapSteam = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $steamPy = Join-Path $Here 'tools\steam_shortcut.py'
+    if (Test-Path -LiteralPath $steamPy) {
+        Write-Host "==> Steam"
+        & $Python $steamPy find | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    Steam not found - skipped."
+        } else {
+            $answer = 'y'
+            # Asked once, here; the helper is then told --yes, so it never asks a
+            # second question through the pipe below, where it would be invisible.
+            if (-not $AddToSteam) { $answer = Read-Host "  Add Ring Out to Steam? (if Steam is open it is closed and restarted) [Y/n]" }
+            if ($answer -match '^[Nn]') {
+                Write-Host "    skipped."
+            } else {
+                $steamArgs = @('add', '--exe', (Join-Path $Here 'RingOut.exe'), '--start-dir', $Here, '--name', 'Soul Calibur 2')
+                $steamIco = Join-Path $Here 'art\icon.ico'
+                if (Test-Path -LiteralPath $steamIco) { $steamArgs += @('--icon', $steamIco) }
+                $steamArgs += '--yes'
+                & $Python $steamPy @steamArgs | ForEach-Object { Write-Host "    $_" }
+            }
+        }
+        $global:LASTEXITCODE = 0
+    }
+    $ErrorActionPreference = $eapSteam
 }
 
 Write-Host ""

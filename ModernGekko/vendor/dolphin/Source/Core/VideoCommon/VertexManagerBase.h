@@ -24,6 +24,11 @@ class PixelShaderManager;
 class PointerWrap;
 struct PortableVertexDeclaration;
 
+namespace RecompSmoothMotion
+{
+class Replayer;
+}
+
 struct Slope
 {
   float dfdx;
@@ -172,6 +177,9 @@ public:
   void OnEndFrame();
 
 protected:
+  // Smooth Motion replays recorded draws through the upload calls below.
+  friend class RecompSmoothMotion::Replayer;
+
   // When utility uniforms are used, the GX uniforms need to be re-written afterwards.
   static void InvalidateConstants();
 

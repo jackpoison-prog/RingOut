@@ -41,7 +41,14 @@ public:
 
   void SetNextSwapEstimatedTime(u64 ticks, TimePoint host_time);
 
-  void Present(PresentInfo* present_info = nullptr);
+  // xfb_override: an image to show in place of the XFB (Smooth Motion's
+  // in-between picture) and the rectangle of it to show.
+  void Present(PresentInfo* present_info = nullptr, const AbstractTexture* xfb_override = nullptr,
+               const MathUtil::Rectangle<int>* override_rc = nullptr);
+
+  // Smooth Motion, GPU thread: one present of the last frame blended toward
+  // the one before (alpha 1 = the last frame as it was).
+  void PresentSmooth(float alpha);
   void ClearLastXfbId() { m_last_xfb_id = std::numeric_limits<u64>::max(); }
 
   bool Initialize();

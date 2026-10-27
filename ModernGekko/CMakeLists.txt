@@ -617,6 +617,22 @@ if(BUILD_TESTING)
         RINGOUT_SETUP_PS1="${CMAKE_CURRENT_SOURCE_DIR}/../dist/RingOut-1.0-dist/windows/setup.ps1")
     add_test(NAME moderngekko.fmv_hooks COMMAND moderngekko_fmv_hooks_test)
 
+    # Ultrawide screen shapes: the per-disc wide-mode constants, their scaling
+    # and the wrong-build guard (RecompScreenShape.h, no Dolphin dependencies).
+    add_executable(moderngekko_screen_shape_test tests/screen_shape_test.cpp)
+    target_include_directories(moderngekko_screen_shape_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core/Core")
+    target_compile_features(moderngekko_screen_shape_test PRIVATE cxx_std_17)
+    add_test(NAME moderngekko.screen_shape COMMAND moderngekko_screen_shape_test)
+
+    # Smooth Motion: draw alignment, blend, per-refresh pacing and when the
+    # option is offered (RecompSmoothMotionMath.h, no Dolphin dependencies).
+    add_executable(moderngekko_smooth_motion_test tests/smooth_motion_test.cpp)
+    target_include_directories(moderngekko_smooth_motion_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core/VideoCommon")
+    target_compile_features(moderngekko_smooth_motion_test PRIVATE cxx_std_17)
+    add_test(NAME moderngekko.smooth_motion COMMAND moderngekko_smooth_motion_test)
+
     if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         add_executable(moderngekko_netplay_protocol_test
             tests/netplay_protocol_test.cpp

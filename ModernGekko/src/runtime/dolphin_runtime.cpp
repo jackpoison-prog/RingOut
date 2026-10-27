@@ -171,6 +171,9 @@ struct Runtime::Impl {
   bool ui_initialized = false;
   bool controllers_initialized = false;
   bool booted = false;
+  // Set when the core first reaches Running. A boot that ends without it failed
+  // inside Dolphin's EmuThread (e.g. no video backend), which BootCore cannot see.
+  std::atomic<bool> reached_running{false};
   std::atomic<bool> running{false};
 };
 
@@ -1135,6 +1138,8 @@ RuntimeRunResult Runtime::Run() {
                          m_impl->config.record_movie.string().c_str());
           }
         }
+        if (state == Core::State::Running)
+          m_impl->reached_running = true;
         // Once the core runs, compare the replay's timing class with the loaded
         // module's. A mismatch still plays -- the pads are identical -- but the
         // match will not unfold the same, so say so.
@@ -1155,6 +1160,7 @@ RuntimeRunResult Runtime::Run() {
         if (state == Core::State::Uninitialized && m_impl->platform)
           m_impl->platform->Stop();
       });
+  m_impl->reached_running = false;
   if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot),
                              m_impl->platform->GetWindowSystemInfo())) {
     m_impl->running = false;
@@ -1179,6 +1185,13 @@ RuntimeRunResult Runtime::Run() {
   Core::Shutdown(Core::System::GetInstance());
   m_impl->booted = false;
   m_impl->running = false;
+  // The video backend failing (RingOut#16: no Vulkan swap chain) stops the core
+  // before it ever runs. Report that as a failed boot, not a normal quit.
+  if (!m_impl->reached_running)
+    return {RuntimeExitReason::BootFailed,
+            RuntimeError{RuntimeErrorCode::BootFailed,
+                         "the emulator stopped before the game started (see the [alert] lines "
+                         "above; a video backend failure is the usual cause)"}};
   return {};
 }
 

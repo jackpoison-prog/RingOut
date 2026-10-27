@@ -73,6 +73,7 @@ Copy-Item (Join-Path $BinDir 'dolrecomp.exe')       (Join-Path $stage 'tools') -
 # The artwork extractor, as the Linux package ships it. Standard library only,
 # so the bundled embeddable Python runs it with nothing added.
 Copy-Item (Join-Path $RepoRoot 'dist\shared\gc-art.py') (Join-Path $stage 'tools') -Force
+Copy-Item (Join-Path $RepoRoot 'dist\shared\steam_shortcut.py') (Join-Path $stage 'tools') -Force
 
 # The runtime imports MSVCP140 / VCRUNTIME140; shipping the redist DLLs beats
 # telling players to go and install the C++ redistributable first.

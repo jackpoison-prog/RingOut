@@ -4,6 +4,7 @@
 #include "VideoBackends/Vulkan/VKVertexManager.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "Common/Align.h"
 #include "Common/CommonTypes.h"
@@ -20,6 +21,7 @@
 #include "VideoCommon/GeometryShaderManager.h"
 #include "VideoCommon/IndexGenerator.h"
 #include "VideoCommon/PixelShaderManager.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexShaderManager.h"
 
@@ -162,7 +164,20 @@ void VertexManager::ResetBuffer(u32 vertex_stride)
       PanicAlertFmt("Failed to allocate space in streaming buffers for pending draw");
   }
 
-  // Update pointers
+  // Update pointers. While Smooth Motion records, batches are built in CPU
+  // memory and copied to the stream buffers on commit, so the recorder never
+  // reads write-combined memory (40 us a batch, against 4).
+  m_staging = RecompSmoothMotion::Recording();
+  if (m_staging)
+  {
+    m_staging_vertices.resize(MAXVBUFFERSIZE);
+    m_staging_indices.resize(MAXIBUFFERSIZE);
+    m_base_buffer_pointer = m_staging_vertices.data();
+    m_end_buffer_pointer = m_staging_vertices.data() + MAXVBUFFERSIZE;
+    m_cur_buffer_pointer = m_staging_vertices.data();
+    m_index_generator.Start(m_staging_indices.data());
+    return;
+  }
   m_base_buffer_pointer = m_vertex_stream_buffer->GetHostPointer();
   m_end_buffer_pointer = m_vertex_stream_buffer->GetCurrentHostPointer() + MAXVBUFFERSIZE;
   m_cur_buffer_pointer = m_vertex_stream_buffer->GetCurrentHostPointer();
@@ -178,6 +193,14 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
   *out_base_vertex =
       vertex_stride > 0 ? (m_vertex_stream_buffer->GetCurrentOffset() / vertex_stride) : 0;
   *out_base_index = m_index_stream_buffer->GetCurrentOffset() / sizeof(u16);
+
+  if (m_staging)
+  {
+    std::memcpy(m_vertex_stream_buffer->GetCurrentHostPointer(), m_staging_vertices.data(),
+                vertex_data_size);
+    std::memcpy(m_index_stream_buffer->GetCurrentHostPointer(), m_staging_indices.data(),
+                index_data_size);
+  }
 
   m_vertex_stream_buffer->CommitMemory(vertex_data_size);
   m_index_stream_buffer->CommitMemory(index_data_size);

@@ -41,6 +41,20 @@ done
 CHANGED="$(git diff --name-only $RANGE 2>/dev/null)"
 [ -z "$CHANGED" ] && exit 0
 
+# The player-side Python helpers (gc-art.py, steam_shortcut.py) ship as-is and
+# are never compiled, so nothing above catches a break in them. Seconds to run.
+if grep -qE '^dist/shared/.*\.py$' <<<"$CHANGED"; then
+    if ! command -v python3 >/dev/null; then
+        echo "pre-push: python3 not found -- skipping the helper tests" >&2
+    elif ! python3 -m unittest discover -s dist/shared -p 'test_*.py' >/tmp/prepush-py.log 2>&1; then
+        echo "pre-push: PYTHON TESTS FAILED -- push aborted. Log: /tmp/prepush-py.log" >&2
+        tail -20 /tmp/prepush-py.log >&2
+        exit 1
+    else
+        echo "pre-push: helper tests $(grep -oE '^Ran [0-9]+ tests?' /tmp/prepush-py.log), OK"
+    fi
+fi
+
 # Only pay for the build when something that can break it moved. A README or a
 # memory note has no way to fail a compile.
 if ! grep -qE '^(ModernGekko/|DolRecomp/|\.github/(scripts|workflows)/|dist/[^/]+/module-src/)' <<<"$CHANGED"; then

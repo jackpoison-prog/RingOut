@@ -26,6 +26,10 @@ namespace Config
 // Graphics.Hardware
 
 extern const Info<bool> GFX_VSYNC;
+// Smooth Motion (RecompSmoothMotion): one blended picture per display refresh.
+extern const Info<bool> GFX_SMOOTH_MOTION;
+// The display's refresh in Hz when the OS reports it wrong; 0 asks the OS.
+extern const Info<int> GFX_SMOOTH_MOTION_REFRESH_HZ;
 extern const Info<int> GFX_ADAPTER;
 
 // Graphics.Settings

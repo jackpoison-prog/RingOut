@@ -12,6 +12,7 @@
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Core.h"
 #include "VideoCommon/FramebufferManager.h"
+#include "VideoCommon/RecompSmoothMotion.h"
 #include "VideoCommon/VideoConfig.h"
 
 PerformanceMetrics::PerformanceMetrics()
@@ -19,6 +20,7 @@ PerformanceMetrics::PerformanceMetrics()
   const auto invalidate_counters_last_time = [this](Core::State) {
     m_fps_counter.InvalidateLastTime();
     m_vps_counter.InvalidateLastTime();
+    m_present_counter.InvalidateLastTime();
   };
   m_state_change_hook = Core::AddOnStateChangedCallback(invalidate_counters_last_time);
 }
@@ -27,6 +29,7 @@ void PerformanceMetrics::Reset()
 {
   m_fps_counter.Reset();
   m_vps_counter.Reset();
+  m_present_counter.Reset();
 
   m_time_sleeping = DT::zero();
   m_samples = {};
@@ -45,6 +48,11 @@ void PerformanceMetrics::CountFrame()
 void PerformanceMetrics::CountVBlank()
 {
   m_vps_counter.Count();
+}
+
+void PerformanceMetrics::CountPresent()
+{
+  m_present_counter.Count();
 }
 
 void PerformanceMetrics::CountThrottleSleep(DT sleep)
@@ -127,6 +135,7 @@ void PerformanceMetrics::DrawImGuiStats(const float backbuffer_scale)
 {
   m_vps_counter.UpdateStats();
   m_fps_counter.UpdateStats();
+  m_present_counter.UpdateStats();
 
   const bool movable_overlays = Config::Get(Config::GFX_MOVABLE_PERFORMANCE_METRICS);
   const int movable_flag = movable_overlays ? ImGuiWindowFlags_None : ImGuiWindowFlags_NoMove;
@@ -320,6 +329,11 @@ void PerformanceMetrics::DrawImGuiStats(const float backbuffer_scale)
       clamp_window_position();
       if (g_ActiveConfig.bShowFPS)
         ImGui::TextColored(ImVec4(r, g, b, 1.0f), "FPS:%7.2lf", fps);
+      // FPS counts game frames, which stay at 60; Smooth Motion shows more
+      // pictures than that, and this is how many reach the screen.
+      if (g_ActiveConfig.bShowFPS && RecompSmoothMotion::Pacing())
+        ImGui::TextColored(ImVec4(r, g, b, 1.0f), "Screen:%4.0lf Hz",
+                           m_present_counter.GetHzAvg());
       if (g_ActiveConfig.bShowFTimes)
       {
         ImGui::TextColored(ImVec4(r, g, b, 1.0f), "dt:%6.2lfms",

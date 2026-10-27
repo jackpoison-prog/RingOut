@@ -172,6 +172,8 @@ elif [ "$embedded" != "Ver $VERSION" ]; then
 fi
 
 install -m 755 "$SRC/RingOut"    "$STAGE/RingOut"
+# One-time "add to my Steam library", run from Desktop Mode (README INSTALLING).
+install -m 755 "$SRC/Add to Steam" "$STAGE/Add to Steam"
 # Same extractor the desktop package ships. The Deck package has no setup.sh --
 # it is prebuilt -- so the launcher runs this the first time a game is present.
 install -m 755 "$REPO/dist/shared/gc-art.py" "$STAGE/tools/gc-art.py"

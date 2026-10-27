@@ -44,8 +44,9 @@ GETTING YOUR GAME ONTO IT
 
 INSTALLING
   Put this folder anywhere on the Deck -- internal storage or an SD card.
-  In Desktop Mode, add RingOut to Steam as a non-Steam game, then launch
-  it from Game Mode. Running ./RingOut directly from a terminal also
+  In Desktop Mode, with Steam open, double-click "Add to Steam" in this
+  folder (or add RingOut as a non-Steam game yourself), then launch it
+  from Game Mode. Running ./RingOut directly from a terminal also
   works and is the quicker way to see errors.
 
   Game Mode gives you Steam's own controller configuration. The runtime
@@ -67,9 +68,14 @@ CONTROLS
   fullscreen setting are not needed and are best left alone.
 
 SETTINGS MENU TABS
-  VIDEO     widescreen, internal resolution, aspect ratio, v-sync,
+  VIDEO     widescreen, screen shape, internal resolution, aspect ratio, v-sync,
             anti-aliasing, anisotropic + texture filtering, filter,
             texture packs, show FPS, free camera, fullscreen
+            Screen Shape (with Widescreen ON): 16:9, 16:10, 21:9 or
+            32:9 -- the 3D fills that shape. At 21:9 and 32:9 the menus
+            and HUD stay at 16:9 in the middle; movies always play at
+            16:9. Netplay and replays always run at 16:9, and so does
+            the Japanese disc.
   AUDIO     volume, mute, latency, fill audio gaps
   SYSTEM    emulation speed, CPU overclock, save/load state, netplay, quit
   CONTROLS  backend and device at the top, then rebind any pad button

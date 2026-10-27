@@ -3,6 +3,7 @@
 
 #include "VideoCommon/RecompMenu.h"
 
+#include "VideoCommon/RecompDisplayRefresh.h"
 #include "VideoCommon/RecompGameData.h"
 #include "VideoCommon/RecompMods.h"
 
@@ -86,9 +87,11 @@ enum class Item
 {
   // Video
   Widescreen,
+  ScreenShape,
   InternalRes,
   AspectRatio,
   VSync,
+  SmoothMotion,
   AntiAliasing,
   Anisotropy,
   TextureFiltering,
@@ -189,11 +192,13 @@ const char* TabName(Tab tab)
 }
 
 // Controls and Cheats build their rows dynamically, so they have no static list.
-const std::vector<Item>& TabItems(Tab tab)
+// By value: Smooth Motion's row exists only where it is offered (Vulkan and a
+// display above 61 Hz), so the Deck's and a 60 Hz panel's VIDEO tab never show it.
+std::vector<Item> TabItems(Tab tab)
 {
   static const std::vector<Item> video = {
-      Item::Widescreen,   Item::InternalRes, Item::AspectRatio,      Item::VSync,
-      Item::AntiAliasing, Item::Anisotropy,  Item::TextureFiltering, Item::TexturePacks,
+      Item::Widescreen,   Item::ScreenShape, Item::InternalRes, Item::AspectRatio,      Item::VSync,
+      Item::SmoothMotion, Item::AntiAliasing, Item::Anisotropy,  Item::TextureFiltering, Item::TexturePacks,
       Item::PrefetchTextures, Item::ShowFPS, Item::FreeCamera,       Item::TrainingHud,
       Item::LensFlares,       Item::Filter,      Item::Renderer,  Item::Fullscreen,
       Item::FullscreenAtLaunch, Item::Apply};
@@ -213,7 +218,13 @@ const std::vector<Item>& TabItems(Tab tab)
   switch (tab)
   {
   case Tab::Video:
-    return video;
+  {
+    if (RecompDisplayRefresh::SmoothMotionOffered())
+      return video;
+    std::vector<Item> shown = video;
+    std::erase(shown, Item::SmoothMotion);
+    return shown;
+  }
   case Tab::Audio:
     return audio;
   case Tab::System:
@@ -980,6 +991,8 @@ const char* ItemLabel(Item item)
   {
   case Item::Widescreen:
     return "Widescreen (16:9)";
+  case Item::ScreenShape:
+    return "Screen Shape";
   case Item::InternalRes:
     return "Internal Resolution";
   case Item::AspectRatio:
@@ -990,6 +1003,8 @@ const char* ItemLabel(Item item)
     return "Filter";
   case Item::VSync:
     return "V-Sync";
+  case Item::SmoothMotion:
+    return "Smooth Motion";
   case Item::AntiAliasing:
     return "Anti-Aliasing";
   case Item::Anisotropy:
@@ -1369,6 +1384,16 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     return netplay_mode == 0 ? "-" : "RESTARTS GAME";
   case Item::Widescreen:
     return RecompWidescreen::IsEnabled() ? "ON" : "OFF";
+  case Item::ScreenShape:
+    // The shape rewrites the game's own constants, which netplay and replays
+    // forbid, and it only means something on top of the game's WIDE mode.
+    if (!RecompWidescreen::ShapesAvailable())
+      return "16:9 only on this disc";
+    if (NetPlay::IsNetPlayRunning())
+      return "16:9 (netplay)";
+    if (!RecompWidescreen::IsEnabled())
+      return "needs Widescreen";
+    return RecompScreenShape::Label(RecompWidescreen::GetShape());
   case Item::InternalRes:
   {
     // A bare "3x" says nothing about what it costs. The EFB is 640x528, so
@@ -1388,6 +1413,14 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
       return "4:3";
     case AspectMode::Stretch:
       return "Stretch";
+    case AspectMode::Custom:
+      // A screen shape shows through Custom (RecompWidescreen); any other
+      // Custom pair is the player's own, from the ini.
+      return RecompScreenShape::IsOurCustomAspect(
+                 Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_WIDTH),
+                 Config::Get(Config::GFX_CUSTOM_ASPECT_RATIO_HEIGHT)) ?
+                 "Screen Shape" :
+                 "Custom";
     default:
       return "Auto";
     }
@@ -1399,6 +1432,8 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     return Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM) ? "OFF" : "ON";
   case Item::VSync:
     return Config::Get(Config::GFX_VSYNC) ? "ON" : "OFF";
+  case Item::SmoothMotion:
+    return Config::Get(Config::GFX_SMOOTH_MOTION) ? "ON" : "OFF";
   case Item::AntiAliasing:
   {
     const u32 samples = Config::Get(Config::GFX_MSAA);
@@ -1798,6 +1833,11 @@ bool AdjustItem(Item item, int direction, State& state)
   case Item::Widescreen:
     ToggleWidescreen();
     break;
+  case Item::ScreenShape:
+    // Refused (no table, netplay, widescreen off): nothing changed to flush.
+    if (!RecompWidescreen::IsEnabled() || !RecompWidescreen::CycleShape(direction))
+      return false;
+    break;
   case Item::InternalRes:
   {
     const int scale = std::clamp(Config::Get(Config::GFX_EFB_SCALE) + direction, 1, 8);
@@ -1811,7 +1851,10 @@ bool AdjustItem(Item item, int direction, State& state)
   {
     static constexpr std::array<AspectMode, 4> kModes = {
         AspectMode::Auto, AspectMode::ForceWide, AspectMode::ForceStandard, AspectMode::Stretch};
-    const AspectMode current = Config::Get(Config::GFX_ASPECT_RATIO);
+    // Custom is where a screen shape shows: it steps as the 16:9 it replaces.
+    AspectMode current = Config::Get(Config::GFX_ASPECT_RATIO);
+    if (current == AspectMode::Custom)
+      current = AspectMode::ForceWide;
     int index = 0;
     for (size_t i = 0; i < kModes.size(); ++i)
       if (kModes[i] == current)
@@ -1826,6 +1869,10 @@ bool AdjustItem(Item item, int direction, State& state)
     break;
   case Item::VSync:
     Config::SetBase(Config::GFX_VSYNC, !Config::Get(Config::GFX_VSYNC));
+    break;
+  case Item::SmoothMotion:
+    // The recorder sees the change at the next frame end, on the video thread.
+    Config::SetBase(Config::GFX_SMOOTH_MOTION, !Config::Get(Config::GFX_SMOOTH_MOTION));
     break;
   case Item::AntiAliasing:
   {
@@ -3685,6 +3732,12 @@ void Draw()
              selected <= static_cast<int>(TabItems(tab).size()) &&
              TabItems(tab)[selected - 1] == Item::NetplayStart)
       hint = "Game data is modified -- restore it in MODS to play online.";
+    // The lag is the price of the option, so it is said where the choice is made.
+    else if (tab == Tab::Video && selected >= 1 &&
+             selected <= static_cast<int>(TabItems(tab).size()) &&
+             TabItems(tab)[selected - 1] == Item::SmoothMotion)
+      hint = "One picture per screen refresh. Adds about 8 ms of input lag on average, up to one "
+             "game frame.";
     if (tab == Tab::Mods && !mod_message.empty())
       hint = mod_message.c_str();
     if (applied_now)
