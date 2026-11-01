@@ -205,7 +205,10 @@ enum class ConnectionError : u8
   // players on the same disc whose modules came out of different recompiler
   // builds, and only the first is something they can fix by swapping discs.
   DifferentGame = 5,
-  CompatibilityMismatch = 6
+  CompatibilityMismatch = 6,
+  // Same disc and build, but one peer is a Mac (arm64) and the other a PC
+  // (x86_64): the modules round floating point differently and would desync.
+  DifferentPlatform = 7
 };
 
 enum class SyncSaveDataID : u8

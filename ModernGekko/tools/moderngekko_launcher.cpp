@@ -872,6 +872,10 @@ int main(int argc, char** argv)
                              "host. Both players need the same game revision and "
                              "release.";
               break;
+            case moderngekko::frontend::NetplayExitCode::DifferentPlatform:
+              launch_error = "The host is on a different kind of computer. Netplay "
+                             "works Mac to Mac or PC to PC, not between the two.";
+              break;
             case moderngekko::frontend::NetplayExitCode::RoomFull:
               launch_error = "All four controller slots are already occupied.";
               break;

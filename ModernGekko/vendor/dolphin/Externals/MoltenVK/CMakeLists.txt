@@ -2,11 +2,10 @@ include(ExternalProject)
 
 set(MOLTENVK_VERSION "v1.2.8")
 
-if(APPLE)
-  set(MOLTENVK_BUILD_CMD ${CMAKE_COMMAND} -E env "XCODEBUILD=set -o pipefail && xcodebuild OTHER_LDFLAGS=-Wl,-ld_classic" make -e -C <SOURCE_DIR> macos)
-else()
-  set(MOLTENVK_BUILD_CMD make -C <SOURCE_DIR> macos)
-endif()
+# Plain make, as upstream Dolphin builds it now: the -ld_classic workaround
+# this copy carried was for Xcode 15's new linker, and that linker is the only
+# one recent Xcodes have.
+set(MOLTENVK_BUILD_CMD make -C <SOURCE_DIR> macos)
 
 ExternalProject_Add(MoltenVK
   GIT_REPOSITORY https://github.com/KhronosGroup/MoltenVK.git
@@ -14,7 +13,7 @@ ExternalProject_Add(MoltenVK
 
   CONFIGURE_COMMAND ${CMAKE_CURRENT_LIST_DIR}/configure.sh <LOG_DIR> <SOURCE_DIR> ${MOLTENVK_VERSION}
 
-  PATCH_COMMAND ${CMAKE_CURRENT_LIST_DIR}/patch.sh ${CMAKE_SOURCE_DIR}/Externals/MoltenVK/patches/ ${MOLTENVK_VERSION}
+  PATCH_COMMAND ${CMAKE_CURRENT_LIST_DIR}/patch.sh ${CMAKE_CURRENT_LIST_DIR}/patches/ ${MOLTENVK_VERSION}
 
   BUILD_COMMAND ${MOLTENVK_BUILD_CMD}
   BUILD_IN_SOURCE ON

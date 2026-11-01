@@ -23,6 +23,7 @@ enum class NetplayExitCode {
   GameRunning = 14,
   ServerFull = 15,
   NicknameRejected = 16,
+  DifferentPlatform = 17,
 };
 
 struct NetplayOptions {

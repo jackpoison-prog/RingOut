@@ -202,6 +202,19 @@ int main() {
   if (first_fingerprint ==
       moderngekko::frontend::CompatibilityFingerprint(changed_config, metadata))
     return 12;
+  // The platform is the fingerprint's second field, so a Mac and a PC never
+  // match: the same module source rounds floating point differently on ARM.
+#if defined(__x86_64__) || defined(_M_X64)
+  if (std::string(moderngekko::frontend::HostPlatformName()) != "x86_64")
+    return 13;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  if (std::string(moderngekko::frontend::HostPlatformName()) != "arm64")
+    return 13;
+#endif
+  if (first_fingerprint.rfind(std::string("moderngekko-netplay-8|") +
+                                  moderngekko::frontend::HostPlatformName() + "|",
+                              0) != 0)
+    return 14;
 
   // ---- identity handshake --------------------------------------------------
   //
@@ -247,6 +260,37 @@ int main() {
     if (wrong_build_ui.error.find("differently built") == std::string::npos)
       return 24;
     wrong_build.reset();
+
+    // A Mac joining a PC: same disc, different platform field. Refused with a
+    // reason that names the platform, not the generic "differently built".
+    {
+      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-8|arm64|A");
+      TestUI mac_host_ui;
+      auto mac_host = std::make_unique<NetPlay::NetPlayServer>(
+          0, false, &mac_host_ui, NetPlay::NetTraversalConfig{});
+      if (!mac_host->is_connected)
+        return 26;
+      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-8|x86_64|A");
+      TestUI pc_ui;
+      auto pc = std::make_unique<NetPlay::NetPlayClient>(
+          "127.0.0.1", mac_host->GetPort(), &pc_ui, "PcPlayer",
+          NetPlay::NetTraversalConfig{});
+      if (pc->IsConnected())
+        return 27;
+      if (pc_ui.error.find("different kind of computer") == std::string::npos)
+        return 28;
+      pc.reset();
+      // Same platform, different build: still the build reason.
+      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-8|arm64|B");
+      TestUI other_mac_ui;
+      auto other_mac = std::make_unique<NetPlay::NetPlayClient>(
+          "127.0.0.1", mac_host->GetPort(), &other_mac_ui, "OtherMac",
+          NetPlay::NetTraversalConfig{});
+      if (other_mac->IsConnected())
+        return 29;
+      if (other_mac_ui.error.find("differently built") == std::string::npos)
+        return 30;
+    }
 
     // And the matching case still connects, or the check above would pass by
     // rejecting everything.

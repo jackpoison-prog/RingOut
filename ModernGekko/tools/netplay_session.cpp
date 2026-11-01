@@ -999,6 +999,8 @@ int RunNetplayLobby(RuntimeConfig runtime_config, ConfigResult frontend_config,
     server.reset();
     detail::SetExternalUICommon(false);
     UICommon::Shutdown();
+    if (error.find("different kind of computer") != std::string::npos)
+      return static_cast<int>(NetplayExitCode::DifferentPlatform);
     return static_cast<int>(mismatch ? NetplayExitCode::CompatibilityMismatch
                                      : NetplayExitCode::HostUnavailable);
   }

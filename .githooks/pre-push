@@ -70,7 +70,7 @@ if ! ./.github/scripts/build-deck.sh >/tmp/prepush-build.log 2>&1; then
 fi
 
 IMAGE=ringout-deck-build
-if ! podman run --rm --userns=keep-id -v "$REPO:/src:Z" -w /src "$IMAGE" bash -c '
+if ! podman run --rm --shm-size=1g --userns=keep-id -v "$REPO:/src:Z" -w /src "$IMAGE" bash -c '
         cmake --build /src/build-deck --target moderngekko-tests >/dev/null 2>&1 &&
         ctest --test-dir /src/build-deck -j"$(nproc)" --output-on-failure
      ' >/tmp/prepush-test.log 2>&1; then
@@ -80,7 +80,7 @@ if ! podman run --rm --userns=keep-id -v "$REPO:/src:Z" -w /src "$IMAGE" bash -c
 fi
 
 echo "pre-push: $(grep -oE '[0-9]+% tests passed, [0-9]+ tests failed out of [0-9]+' /tmp/prepush-test.log | head -1), glibc floor $(
-    podman run --rm --userns=keep-id -v "$REPO:/src:Z" -w /src "$IMAGE" \
+    podman run --rm --shm-size=1g --userns=keep-id -v "$REPO:/src:Z" -w /src "$IMAGE" \
       objdump -T /src/build-deck/moderngekko-run 2>/dev/null |
       grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
 exit 0

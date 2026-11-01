@@ -65,6 +65,14 @@ std::vector<std::unique_ptr<ModuleLibrary>> &PinnedModuleLibraries() {
 #endif
 } // namespace
 
+const char *HostPlatformName() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+  return "arm64";
+#else
+  return "x86_64";
+#endif
+}
+
 std::string CompatibilityFingerprint(const RuntimeConfig &config,
                                      const GameMetadata &game) {
   std::string module = "interpreter";
@@ -94,7 +102,10 @@ std::string CompatibilityFingerprint(const RuntimeConfig &config,
   // untouched, so on -6 two peers with different skins matched on every field
   // here and then desynced in play with nothing to explain it. Its contents
   // reach guest RAM, so they are part of what has to agree.
-  return "moderngekko-netplay-7|" + Common::GetScmRevGitStr() + "|" +
+  // -8: the platform is the SECOND field, where the server looks for it to
+  // refuse a Mac joining a PC with that reason instead of "differently built".
+  return std::string("moderngekko-netplay-8|") + HostPlatformName() + "|" +
+         Common::GetScmRevGitStr() + "|" +
          game.disc_id + "|" + game.dol_sha256 + "|" +
          RecompGameData::Fingerprint() + "|" +
          std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|" +

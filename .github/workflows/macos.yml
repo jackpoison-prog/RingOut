@@ -1,0 +1,170 @@
+name: macOS build
+
+# Apple Silicon. Nobody working on this has a Mac, so CI is the only place the
+# macOS runtime is built and run at all -- the same reason windows.yml exists.
+# What it can check without the game: the build, the unit tests (including
+# guest RAM on the Mac's real 16 KB pages, which qemu on a Linux desktop cannot
+# show), that the app starts, that it links nothing from Homebrew, that the
+# private repo's path did not leak into the binaries, and then the package
+# itself: RingOut.app with MoltenVK, the pinned toolchain, and that toolchain
+# compiling and linking from the unzipped package the way a player's Mac runs it.
+# The game itself is never here: no disc and nothing derived from one.
+on:
+  # A dispatch only exists once this file is on main; until then a run is
+  # started by pushing to ci/macos-run, which nothing else pushes to.
+  push:
+    branches: [ci/macos-run]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to the private macos-latest pre-release (default: artifact only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # the publish path only; a build run writes nothing
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Tools
+        # Xcode 26: the default 16.4's libc++ has no std::jthread/stop_token,
+        # which the runtime uses (first run, 40612730887).
+        run: |
+          # bash: privacy-scan.sh is bash 4, and /bin/bash here is 3.2 (as on
+          # every player's Mac -- setup.sh itself is tested under 3.2 below).
+          brew install ninja bash
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          clang++ --version | head -1
+
+      - name: Configure
+        # USE_SYSTEM_LIBS=OFF: the runner has Homebrew's lzo, lz4, zstd and
+        # libusb, and AUTO linked those (run 40623308932); a player has none.
+        run: |
+          cmake -S ModernGekko -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DUSE_SYSTEM_LIBS=OFF \
+            -DENABLE_QT=OFF -DENABLE_TESTS=OFF \
+            -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF
+
+      - name: Build runtime and recompiler
+        # -k 0: a CI run costs ~10x on macOS, so report EVERY error, not the first.
+        run: cmake --build build --target moderngekko-run dolrecomp MoltenVK -- -k 0
+
+      - name: Unit tests
+        run: |
+          cmake --build build -- -k 0
+          ctest --test-dir build --output-on-failure -j"$(sysctl -n hw.ncpu)"
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          run="$(find build -type f -name moderngekko-run -perm -u+x | head -1)"
+          echo "runtime: $run"
+          # Starting it at all proves dyld resolved every library; with no game
+          # it prints its usage and stops.
+          "$run" --smoke-test-unknown-flag 2>&1 | tee usage.txt || true
+          grep -q 'usage: moderngekko-run' usage.txt
+          # Not strings|grep -m1: grep exits early and strings dies on the pipe.
+          grep -a -o -m1 'RingOut Ver [0-9.]*' "$run"
+          # Nothing may come from Homebrew or /usr/local: a player has neither.
+          if otool -L "$run" | grep -E '/opt/homebrew|/usr/local'; then
+            echo "::error::the runtime links a library a player will not have"; exit 1
+          fi
+          ./build/moderngekko_mem_arena_smoke_test | tee arena.txt
+          grep -q 'page size: 16384' arena.txt
+
+      - name: Check binaries for the build path
+        # Same guard as windows.yml: the binaries ship publicly, this repo is
+        # private, and the runner's checkout path names it.
+        run: |
+          set -euo pipefail
+          name="${{ github.event.repository.name }}"
+          bad=0
+          for f in $(find build -type f \( -name moderngekko-run -o -name dolrecomp -o -name libMoltenVK.dylib \) -perm -u+x); do
+            n=$(LC_ALL=C grep -c -a -F "$name/$name" "$f" || true)
+            u=$(LC_ALL=C grep -c -a -F "$(printf '%s' "$name/$name" | sed 's/./&\x00/g')" "$f" || true)
+            if [ "$n" != 0 ] || [ "$u" != 0 ]; then echo "::error::$f contains the build path"; bad=1; fi
+          done
+          exit $bad
+
+      - name: Fetch the pinned toolchain
+        # LLVM 22.1.8: the exact clang the plain <ID>.profdata set is trained
+        # with, as package-windows.ps1 pins it. CMake and ninja: players have
+        # neither, so they ship too.
+        run: |
+          set -euo pipefail
+          tc="$RUNNER_TEMP/tc"; mkdir -p "$tc"; cd "$tc"
+          curl -fsSLO https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-macOS-ARM64.tar.xz
+          tar xf LLVM-22.1.8-macOS-ARM64.tar.xz
+          # The release tarball has no licence file; clang ships, so its terms must.
+          curl -fsSL -o LLVM-22.1.8-macOS-ARM64/LICENSE.TXT https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-22.1.8/llvm/LICENSE.TXT
+          curl -fsSLO https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5-macos-universal.tar.gz
+          tar xzf cmake-4.4.5-macos-universal.tar.gz
+          curl -fsSLO https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-mac.zip
+          unzip -q ninja-mac.zip
+          curl -fsSL -o ninja-COPYING https://raw.githubusercontent.com/ninja-build/ninja/v1.13.2/COPYING
+          {
+            echo "LLVM_DIR=$tc/LLVM-22.1.8-macOS-ARM64"
+            echo "CMAKE_DIR=$tc/cmake-4.4.5-macos-universal/CMake.app/Contents"
+            echo "NINJA=$tc/ninja"
+            echo "NINJA_LICENSE=$tc/ninja-COPYING"
+          } >> "$GITHUB_ENV"
+
+      - name: Package
+        run: BUILD=build BASH4="$(brew --prefix)/bin/bash" .github/scripts/package-macos.sh
+
+      - name: Toolchain smoke (from the unzipped package)
+        # What a player's Mac does: unzip, then setup.sh under the system
+        # /bin/bash 3.2, with the bundled clang -- never Apple's.
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP/pkgtest"; rm -rf "$t"; mkdir -p "$t"; cd "$t"
+          unzip -q "$GITHUB_WORKSPACE"/dist/RingOut-*-macos-arm64.zip
+          P="$(cd RingOut-*-macos && pwd -P)"
+          "$P/toolchain/bin/clang" --version | head -1 | tee clang.txt
+          grep -qF 'clang version 22.1.8' clang.txt
+          D="$P/module-src/deps/dolrecomp-src"
+          # ThinLTO through Apple's linker and our libLTO, with the US profile:
+          # the module's own link, in miniature.
+          SDKROOT="$(xcrun --show-sdk-path)" "$P/toolchain/bin/clang" -mcpu=native \
+            -ffp-contract=off -O2 -flto=thin -shared -fPIC -I"$D/cpu" -I"$D" \
+            -fprofile-use="$P/module-src/profiles/GRSEAF.profdata" -Wno-profile-instr-unprofiled \
+            -Wno-profile-instr-out-of-date "$D/cpu/cpu.c" -o cpu.dylib
+          file cpu.dylib | tee file.txt
+          grep -q 'Mach-O 64-bit dynamically linked shared library arm64' file.txt
+          /bin/bash --version | head -1
+          /bin/bash "$P/setup.sh" --check-toolchain | tee check.txt
+          grep -qxF "clang: $P/toolchain/bin/clang" check.txt
+          # The app starts from the package (dyld finds everything in the bundle).
+          # It exits 2 on the unknown flag, which pipefail would report as the failure.
+          "$P/RingOut.app/Contents/MacOS/moderngekko-run" --no-such-flag > usage.txt 2>&1 || true
+          grep -q 'usage: moderngekko-run' usage.txt
+
+      - name: Upload the package for a check
+        # One day: the toolchain makes this large, and the private repo's
+        # artifact allowance is 500 MB in all (see windows.yml).
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-package
+          retention-days: 1
+          path: dist/RingOut-*-macos-arm64.zip
+
+      - name: Publish (private pre-release)
+        if: ${{ inputs.publish }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view macos-latest >/dev/null 2>&1 || \
+            gh release create macos-latest --prerelease --title "macOS build (rolling)" \
+              --notes "Built from ${GITHUB_SHA}." --target "$GITHUB_SHA"
+          gh release upload macos-latest dist/RingOut-*-macos-arm64.zip --clobber

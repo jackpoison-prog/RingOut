@@ -43,7 +43,11 @@
 // unnoticed because the shipped binary predates it and install(1) re-stamped its
 // mtime, so it looked current. The pin is only ever needed for the module, which
 // is the thing that gets dlopened on a Deck.
-#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID)
+//
+// x86-64 only: GLIBC_2.2.5 is that architecture's base version. ARM64's glibc
+// starts at 2.17 and has one fmod, so the pin there is an undefined symbol
+// (found by the aarch64 correctness gate for the Mac port).
+#if defined(__linux__) && defined(__GLIBC__) && defined(MODULE_GAME_ID) && defined(__x86_64__)
 __asm__(".symver fmod,fmod@GLIBC_2.2.5");
 #endif
 

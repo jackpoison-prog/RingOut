@@ -28,8 +28,11 @@ SRC_PKG="$REPO/dist/RingOut-1.0-dist"
 mkdir -p "$DEST"
 
 usa=""
+# The tracked copy in dist/shared is last: it exists so a CI checkout (the
+# macOS package) has one; a developer tree keeps using its own.
 for cand in "$SRC_PKG/userdata/GameSettings/GRSEAF.ini" \
-            "$REPO/work/mg_userdir/GameSettings/GRSEAF.ini"; do
+            "$REPO/work/mg_userdir/GameSettings/GRSEAF.ini" \
+            "$REPO/dist/shared/GameSettings/GRSEAF.ini"; do
   [ -s "$cand" ] && { usa="$cand"; break; }
 done
 if [ -n "$usa" ]; then

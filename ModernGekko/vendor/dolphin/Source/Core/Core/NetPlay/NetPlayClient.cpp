@@ -289,6 +289,11 @@ bool NetPlayClient::Connect()
           _trans("The host is playing a different game. Both players need the same disc: "
                  "a Japanese or European copy cannot join a session hosted from a US one."));
       break;
+    case ConnectionError::DifferentPlatform:
+      m_dialog->OnConnectionError(
+          _trans("The host is on a different kind of computer. Netplay works Mac to Mac or "
+                 "PC to PC, not between the two."));
+      break;
     case ConnectionError::CompatibilityMismatch:
       m_dialog->OnConnectionError(
           _trans("The host has the same game but a differently built copy of it. Both players "

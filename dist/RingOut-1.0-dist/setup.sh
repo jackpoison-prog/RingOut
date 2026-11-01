@@ -13,6 +13,9 @@
 #                   and restarting Steam if it is running).
 #   --no-steam      do not offer it. -y alone never touches Steam either.
 set -euo pipefail
+# macOS still ships bash 3.2, where expanding an EMPTY array ("${TWIN[@]}") under
+# set -u is an "unbound variable" error. Every bash from 4.4 on is fine.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then set +u; fi
 
 HERE="$(dirname "$(readlink -f "$0")")"
 DEPS="$HERE/module-src/deps"
@@ -33,11 +36,52 @@ DEPS="$HERE/module-src/deps"
 #
 # --deck fixes the first and checks the second. Without it the build is tuned
 # for this machine, which is faster and right for playing here.
+#
+# ARM (Apple Silicon, ARM Linux) names its CPU with -mcpu, not -march, and has
+# no Deck build: a Steam Deck is x86, so a module made here could never run on
+# one. pick_cpu_flags <uname -m> <deck 0|1> prints the flag or refuses.
+pick_cpu_flags() {
+    case "$1" in
+        arm64|aarch64)
+            if [ "$2" = 1 ]; then
+                echo "--deck is for the Steam Deck (x86) only" >&2
+                return 2
+            fi
+            echo "-mcpu=native" ;;
+        *)
+            if [ "$2" = 1 ]; then echo "-march=x86-64-v3"; else echo "-march=native"; fi ;;
+    esac
+}
+# Sourced by tests/test_setup_arch.sh for the function above, not run.
+
+# macOS (Apple Silicon) differs in four places: the module is a .dylib, the
+# runtime lives inside RingOut.app, there is no nproc, and -- for now -- only the
+# US disc is supported there (its profile and hot lists are the ones verified).
+module_suffix() {
+    if [ "$1" = Darwin ]; then echo .dylib; else echo .so; fi
+}
+mac_disc_ok() {
+    if [ "$1" = Darwin ] && [ "$2" != GRSEAF ]; then
+        echo "This Mac build supports the US disc (GRSEAF) for now; this disc is $2." >&2
+        return 1
+    fi
+    return 0
+}
+runtime_path() {
+    if [ "$1" = Darwin ]; then echo "$2/RingOut.app/Contents/MacOS/moderngekko-run"
+    else echo "$2/bin/moderngekko-run"; fi
+}
+cpu_count() {
+    nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
+}
+if [ "${RINGOUT_SETUP_LIB:-0}" = 1 ]; then return 0; fi
+
 DECK=0
 ISO=""
 PGO=0
 ASSUME_YES=0
 STEAM=ask
+CHECK_TOOLCHAIN=0
 for arg in "$@"; do
     case "$arg" in
         --deck) DECK=1 ;;
@@ -45,6 +89,7 @@ for arg in "$@"; do
         -y|--yes) ASSUME_YES=1 ;;
         --add-to-steam) STEAM=yes ;;
         --no-steam)     STEAM=no ;;
+        --check-toolchain) CHECK_TOOLCHAIN=1 ;;
         *)      [ -z "$ISO" ] && ISO="$arg" ;;
     esac
 done
@@ -59,7 +104,33 @@ if [ "$PGO" = 1 ]; then NSTAGES=4; else NSTAGES=3; fi
 PGO_STATE="none"          # none | shipped | self-trained
 PGO_WHY=""                # why not, in the player's words
 
-if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
+OS="$(uname -s)"
+MODSUF="$(module_suffix "$OS")"
+RUNTIME="$(runtime_path "$OS" "$HERE")"
+if [ "$OS" = Darwin ]; then
+    # A downloaded zip marks every file with com.apple.quarantine, and macOS will
+    # not run an unsigned program that carries it -- which is every tool here.
+    # Cleared for this folder only, once; the README says why.
+    if xattr -p com.apple.quarantine "$HERE/tools/dolrecomp" >/dev/null 2>&1; then
+        xattr -dr com.apple.quarantine "$HERE" 2>/dev/null || true
+        echo "==> cleared the download quarantine on this folder (the app is unsigned)"
+    fi
+    # Our own clang, cmake and ninja, never Apple's clang: Apple's cannot read the
+    # speed profiles, and changes with every Xcode update.
+    export PATH="$HERE/toolchain/bin:$PATH"
+    # What we cannot ship is Apple's C library headers (licence), so the free
+    # Command Line Tools are required; xcrun is how every tool finds them.
+    if ! SDKROOT="$(xcrun --show-sdk-path 2>/dev/null)" || [ ! -d "$SDKROOT" ]; then
+        echo "Recompiling the disc needs Apple's free Command Line Tools (the C library"
+        echo "headers every Mac program is built against). macOS is opening its installer"
+        echo "now; when it finishes, run Setup again."
+        xcode-select --install >/dev/null 2>&1 || true
+        exit 1
+    fi
+    export SDKROOT
+fi
+
+if [ "$CHECK_TOOLCHAIN" != 1 ] && { [ -z "$ISO" ] || [ ! -f "$ISO" ]; }; then
     echo "Usage: ./setup.sh [--deck] [--pgo] [-y] /path/to/your/disc.iso"
     echo
     echo "Supply a GameCube disc image you already have."
@@ -70,11 +141,7 @@ if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
     exit 1
 fi
 
-if [ "$DECK" = 1 ]; then
-    MARCH="x86-64-v3"
-else
-    MARCH="native"
-fi
+CPU_FLAGS="$(pick_cpu_flags "$(uname -m)" "$DECK")" || exit 1
 
 missing=""
 for tool in cmake ninja python3; do
@@ -134,7 +201,9 @@ cat > "$_probe/probe.c" <<'EOF'
 #include <stdlib.h>
 int main(void) { return (int)strlen(""); }
 EOF
-for candidate in clang gcc cc; do
+CANDIDATES="clang gcc cc"
+[ "$OS" = Darwin ] && CANDIDATES="$HERE/toolchain/bin/clang"
+for candidate in $CANDIDATES; do
     command -v "$candidate" >/dev/null || continue
     if "$candidate" "$_probe/probe.c" -o "$_probe/probe" >/dev/null 2>&1; then
         CC="$(command -v "$candidate")"
@@ -181,7 +250,13 @@ row() { printf "    %-16s %-26s %s\n" "$1" "$2" "$3"; }
 # The disc ID decides which profile applies, so read it now if the format lets
 # us. A plain .iso/.gcm starts with it; .rvz/.gcz are compressed, so those wait
 # for the extract step and say so rather than guessing.
-PRE_ID="$(head -c 6 "$ISO" 2>/dev/null | tr -dc 'A-Z0-9')"
+if [ "$CHECK_TOOLCHAIN" = 1 ]; then
+    PRE_ID=GRSEAF   # no disc in a toolchain check; the US profile is the one asked about
+else
+    PRE_ID="$(head -c 6 "$ISO" 2>/dev/null | tr -dc 'A-Z0-9')"
+fi
+# Refused before the extract when the header already says so, not ten minutes in.
+if [ -n "$PRE_ID" ]; then mac_disc_ok "$OS" "$PRE_ID" || exit 1; fi
 case "$PRE_ID" in
     G?????) ;;
     *) PRE_ID="" ;;
@@ -192,7 +267,7 @@ echo "==> Preflight"
 row "compiler" "$("$CC" --version 2>&1 | head -1 | cut -c1-26)" "OK"
 row "cmake" "$(cmake --version 2>/dev/null | head -1 | cut -d' ' -f3)" "OK"
 row "ninja" "$(ninja --version 2>/dev/null)" "OK"
-FREE_GB="$(df -BG --output=avail "$HERE" 2>/dev/null | tail -1 | tr -dc '0-9')"
+FREE_GB="$(df -Pk "$HERE" 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')"
 if [ -n "$FREE_GB" ] && [ "$FREE_GB" -lt 5 ]; then
     row "free space" "${FREE_GB}G" "TIGHT -- needs about 5G"
 else
@@ -244,6 +319,11 @@ elif [ -n "$PRE_ID" ]; then
     row "shipped profile" "none ships for $PRE_ID" "costs 10-14%; --pgo fixes it"
 else
     row "shipped profile" "checked after extract" "-"
+fi
+
+if [ "$CHECK_TOOLCHAIN" = 1 ]; then
+    echo "clang: $CC"
+    exit 0
 fi
 
 if [ "$PGO" = 1 ]; then
@@ -308,7 +388,7 @@ rm -rf "$HERE/game"
 # fallback covers the rest rather than replacing anything.
 if ! "$HERE/tools/dolrecomp" extract "$ISO" "$HERE/game" 2>/dev/null; then
     echo "    (that format needs the runtime's extractor -- using it)"
-    if ! "$HERE/bin/moderngekko-run" --extract "$ISO" "$HERE/game"; then
+    if ! "$RUNTIME" --extract "$ISO" "$HERE/game"; then
         echo
         echo "Could not read $ISO as a GameCube disc image."
         echo "Supported: .iso .gcm .wbfs .rvz .gcz .wia and NKit variants of those."
@@ -322,6 +402,7 @@ if [ -z "$DISC_ID" ]; then
     exit 1
 fi
 echo "    disc id: $DISC_ID"
+mac_disc_ok "$OS" "$DISC_ID" || exit 1
 
 # Record what came off the disc, so the game can later tell whether root.olk is
 # still that. Character skins (the GameBanana ones) patch root.olk in place with
@@ -550,7 +631,7 @@ if [ -f "$HERE/module-src/profiles/$DISC_ID.hot" ]; then
     TWIN=(--twin-hot "$HERE/module-src/profiles/$DISC_ID.hot" --twin-regs ratio --twin-cr)
 fi
 "$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
-    "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(nproc)" "$HERE/work/out"
+    "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(cpu_count)" "$HERE/work/out"
 # gen_module_tables.py reads main.dol from alongside the generated sources.
 cp "$HERE/game/sys/main.dol" "$HERE/work/out/generated/main.dol"
 
@@ -634,7 +715,7 @@ fi
 cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER="$CC" \
-      -DCMAKE_C_FLAGS="-march=$MARCH" \
+      -DCMAKE_C_FLAGS="$CPU_FLAGS" \
       "${PGO_ARGS[@]}" \
       "${PSQ_FAST[@]}" \
       -DGAME_ID="$DISC_ID" \
@@ -645,7 +726,7 @@ cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
       -DMODULE_TEMPLATE="$DEPS/module-template" 2>&1 | tee "$HERE/work/configure.log"
 cmake --build "$HERE/work/build"
 
-cp "$HERE/work/build/g${DISC_ID}_recomp.so" "$HERE/bin/"
+cp "$HERE/work/build/g${DISC_ID}_recomp$MODSUF" "$HERE/bin/"
 
 # What did CMake actually do with the profile? Its own probe is the authority:
 # a profile can be present, passed, and still refused for being too new to read,
@@ -748,7 +829,7 @@ if [ "$PGO" = 1 ]; then
     cmake -S "$HERE/module-src" -B "$HERE/work/build-gen" -GNinja \
              -DCMAKE_BUILD_TYPE=Release \
              -DCMAKE_C_COMPILER="$CC" \
-             -DCMAKE_C_FLAGS="-march=$MARCH -fprofile-generate=$PROFDIR$MISS_DEF" \
+             -DCMAKE_C_FLAGS="$CPU_FLAGS -fprofile-generate=$PROFDIR$MISS_DEF" \
              -DCMAKE_SHARED_LINKER_FLAGS="-fprofile-generate=$PROFDIR" \
              -DMODULE_LTO=OFF \
              "${PSQ_FAST[@]}" \
@@ -783,9 +864,9 @@ if [ "$PGO" = 1 ]; then
         RINGOUT_DETERMINISM_NOHASH=1 \
         RINGOUT_DETERMINISM_FRAMES=6000 \
         RINGOUT_DETERMINISM_INPUT="$HERE/tools/train-route.txt" \
-          "$HERE/bin/moderngekko-run" --headless \
+          "$RUNTIME" --headless \
             --user-dir "$HERE/work/pgo-user" --game "$HERE/game" \
-            --module "$HERE/work/build-gen/g${DISC_ID}_recomp.so" \
+            --module "$HERE/work/build-gen/g${DISC_ID}_recomp$MODSUF" \
             >"$HERE/work/pgo-train.log" 2>&1 || true
 
     return 0
@@ -807,7 +888,7 @@ if [ "$PGO" = 1 ]; then
                     sort -u -k1,1 > "$HERE/work/local.hot"
                 TWIN=(--twin-hot "$HERE/work/local.hot" --twin-regs ratio --twin-cr)
                 if ! { "$HERE/tools/dolrecomp" --gamecube "$HERE/game/sys/main.dol" --idle-pc auto \
-                         "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(nproc)" "$HERE/work/out" \
+                         "${LEADER_CASES[@]}" "${TWIN[@]}" -j"$(cpu_count)" "$HERE/work/out" \
                          >"$HERE/work/pgo-regen.log" 2>&1 \
                        && cp "$HERE/game/sys/main.dol" "$HERE/work/out/generated/main.dol" \
                        && pgo_train; }; then
@@ -870,7 +951,7 @@ if [ "$PGO" = 1 ]; then
             if cmake -S "$HERE/module-src" -B "$HERE/work/build" -GNinja \
                      -DCMAKE_BUILD_TYPE=Release \
                      -DCMAKE_C_COMPILER="$CC" \
-                     -DCMAKE_C_FLAGS="-march=$MARCH" \
+                     -DCMAKE_C_FLAGS="$CPU_FLAGS" \
                      -DMODULE_PGO_PROFILE="$HERE/work/local.profdata" \
                      "${PSQ_FAST[@]}" \
                      -DGAME_ID="$DISC_ID" \
@@ -881,7 +962,7 @@ if [ "$PGO" = 1 ]; then
                      -DMODULE_TEMPLATE="$DEPS/module-template" >"$HERE/work/pgo-use.log" 2>&1 \
                && cmake --build "$HERE/work/build" >>"$HERE/work/pgo-use.log" 2>&1
             then
-                cp "$HERE/work/build/g${DISC_ID}_recomp.so" "$HERE/bin/"
+                cp "$HERE/work/build/g${DISC_ID}_recomp$MODSUF" "$HERE/bin/"
                 PGO_STATE="self-trained"; PGO_WHY=""
                 echo "    done -- built with a profile trained on your own machine."
             else
@@ -913,11 +994,11 @@ fi
 # Checked here or nowhere: the module is built on the PLAYER's machine, so no
 # release gate ever sees it. That is how a single fmod call quietly raised the
 # floor to 2.38 on every current distro until 2026-08-12.
-MODULE="$HERE/bin/g${DISC_ID}_recomp.so"
+MODULE="$HERE/bin/g${DISC_ID}_recomp$MODSUF"
 deck_ok=1
 
 floor=""
-if command -v objdump >/dev/null 2>&1; then
+if [ "$OS" != Darwin ] && command -v objdump >/dev/null 2>&1; then
     floor="$(objdump -T "$MODULE" 2>/dev/null |
              grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
 fi
@@ -933,7 +1014,7 @@ fi
 # The instruction-set half. -march=native targets THIS CPU; anything above
 # x86-64-v3 is not executable on the Deck's Zen 2 and shows up as an instant
 # crash rather than a load error, so it is worth naming before it happens.
-if [ "$MARCH" = "native" ] &&
+if [ "$CPU_FLAGS" = "-march=native" ] &&
    grep -qE '^flags.*\b(avx512[a-z0-9]*|avx_vnni|avxvnni|amx_tile)\b' /proc/cpuinfo 2>/dev/null; then
     deck_ok=0
     isa_problem="this CPU has instructions the Deck's Zen 2 does not (AVX-512 or AVX-VNNI)"
@@ -987,7 +1068,7 @@ elif [ "$DECK" = 1 ]; then
         echo "    Installing into $(basename "$target") ..."
         rm -rf "$target/game"
         cp -r "$HERE/game" "$target/game"
-        cp "$HERE/bin/g${DISC_ID}_recomp.so" "$target/bin/"
+        cp "$HERE/bin/g${DISC_ID}_recomp$MODSUF" "$target/bin/"
         echo "    done: game/ and g${DISC_ID}_recomp.so are in $(basename "$target")."
         echo "    Play it with:  cd $target && ./RingOut"
     else
@@ -1014,7 +1095,9 @@ fi
 # from shadowing the host's Mesa -- run bare, a window may get no Vulkan driver.
 # RINGOUT_DETERMINISM_LOG arms the frame limit (see the --pgo stage above);
 # without it the game would just keep running.
-if [ "$DECK" != 1 ] && [ -z "${RINGOUT_NO_SHADER_WARMUP:-}" ]; then
+# Not on macOS: there is no timeout(1) there, and the Mac launcher is the app.
+# The first launch builds the shaders instead.
+if [ "$DECK" != 1 ] && [ "$OS" != Darwin ] && [ -z "${RINGOUT_NO_SHADER_WARMUP:-}" ]; then
     echo "==> shaders"
     if ls "$HERE"/userdata/Cache/Shaders/*-uber-ps-*.cache >/dev/null 2>&1; then
         echo "    already built - skipped."
@@ -1046,15 +1129,18 @@ fi
 # machine, exactly as the module above is. art/banner.png is the disc banner;
 # art/icon.png is the memory-card icon, which only exists once you have saved,
 # so this is worth re-running after you have played.
-echo "==> artwork"
-python3 "$HERE/tools/gc-art.py" "$HERE" || true
+# (Not on macOS yet: the art, the desktop entry and Steam are the Linux desktop's.)
+if [ "$OS" != Darwin ]; then
+    echo "==> artwork"
+    python3 "$HERE/tools/gc-art.py" "$HERE" || true
+fi
 
 # A desktop entry, so the game appears in menus with its own icon rather than
 # as a shell script. Written with absolute paths because the package is run
 # from wherever it was unpacked, not installed to a prefix.
 ICON="$HERE/art/icon.png"
 [ -f "$ICON" ] || ICON="$HERE/art/banner.png"
-if [ -f "$ICON" ]; then
+if [ "$OS" != Darwin ] && [ -f "$ICON" ]; then
     cat > "$HERE/RingOut.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
@@ -1079,6 +1165,8 @@ if [ "$DECK" = 1 ]; then
         echo "==> Steam"
         echo "    skipped (--deck): on the Deck, run \"Add to Steam\" in the Deck folder."
     fi
+elif [ "$OS" = Darwin ]; then
+    :
 elif [ "$STEAM" = yes ] || { [ "$STEAM" = ask ] && [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; }; then
     echo "==> Steam"
     if python3 "$HERE/tools/steam_shortcut.py" find >/dev/null 2>&1; then

@@ -39,7 +39,9 @@ DIR="${1:?usage: privacy-scan.sh <staged-package-dir>}"
 #    \b stops it matching RingOutRecomp while still allowing /RingOut/... .
 #  - /home/deck and /home/user are generic; they name no individual and appear
 #    in SteamOS-facing docs and defaults.
-ALLOW='ALL\.Net|CyCraft|Key of Avalon|MarioKart|namcam|github\.com/jackpoison-prog/RingOut\b|/home/deck|/home/user\b'
+#  - Apple's Retina image names (name@2x.png) read as email addresses, and a
+#    signed .app lists every one of them in _CodeSignature/CodeResources.
+ALLOW='ALL\.Net|CyCraft|Key of Avalon|MarioKart|namcam|github\.com/jackpoison-prog/RingOut\b|/home/deck|/home/user\b|@[1-9]x\.(png|jpe?g|gif|tiff?|icns)\b'
 [ -n "${PRIVACY_EXTRA_ALLOW:-}" ] && ALLOW="$ALLOW|$PRIVACY_EXTRA_ALLOW"
 
 # Where this repository is checked out, regex-escaped. BUILD_ROOT= overrides it

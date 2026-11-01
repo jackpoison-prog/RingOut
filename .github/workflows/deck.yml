@@ -55,7 +55,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: debian:12
+    container:
+      image: debian:12
+      # The memory-arena test maps guest RAM from /dev/shm; Docker's 64 MB
+      # default is smaller than the arena and ends in SIGBUS.
+      options: --shm-size=1g
     timeout-minutes: 120
 
     env:

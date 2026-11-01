@@ -584,6 +584,14 @@ static inline f32 dolrecomp_cvt_single(f64 v) {
     __asm__("cvtsd2ss %1, %0" : "=x"(r) : "x"(v));
 #endif
     return r;
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    /* The same reason on ARM: the host runs with FPCR.FZ|AH (Dolphin's
+     * non-IEEE mode, = x86 FTZ without DAZ) and a folded (f32)v left
+     * single-precision denormals in RAM that x86 flushes (0x80471460 at frame
+     * 3058 of the arcade route, found by the aarch64 gate for the Mac port). */
+    f32 r;
+    __asm__("fcvt %s0, %d1" : "=w"(r) : "w"(v));
+    return r;
 #else
     return (f32)v;
 #endif

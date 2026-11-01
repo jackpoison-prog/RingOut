@@ -474,6 +474,18 @@ ConnectionError NetPlayServer::OnConnect(ENetPeer* incoming_connection, sf::Pack
   {
     if (peer_disc_id != m_game_disc_id)
       return ConnectionError::DifferentGame;
+    // The platform is the fingerprint's second '|' field (moderngekko-netplay-8
+    // and later); checked first so a Mac joining a PC is told that, not
+    // "differently built". Fingerprints without fields compare whole, below.
+    const auto platform = [](const std::string& fp) {
+      const auto a = fp.find('|');
+      const auto b = a == std::string::npos ? a : fp.find('|', a + 1);
+      return b == std::string::npos ? std::string() : fp.substr(a + 1, b - a - 1);
+    };
+    const std::string peer_platform = platform(peer_fingerprint);
+    const std::string our_platform = platform(m_game_fingerprint);
+    if (!peer_platform.empty() && !our_platform.empty() && peer_platform != our_platform)
+      return ConnectionError::DifferentPlatform;
     if (peer_fingerprint != m_game_fingerprint)
       return ConnectionError::CompatibilityMismatch;
   }

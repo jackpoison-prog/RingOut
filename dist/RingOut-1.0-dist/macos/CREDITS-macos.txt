@@ -1,0 +1,84 @@
+Ring Out - Ver 1.0
+macOS (Apple Silicon) build
+Credits, disclaimer and licensing
+=================================
+
+DISCLAIMER
+----------
+This package was put together by Jack Poison, working with AI assistance
+(Anthropic's Claude). The AI wrote and debugged a large share of the code
+in this port -- the in-game settings overlay, the controller-remapping and
+cheat pages, the free-camera wiring, the FMV replacement path, several
+static-recompiler codegen fixes, and this packaging -- under Jack Poison's
+direction, with testing and decisions made by him.
+
+It is an unofficial fan project. It is not affiliated with, endorsed by, or
+connected to any of the projects or companies named below.
+
+No game data or game code is included. You supply a GameCube disc image
+that you already have, and Setup.command recompiles it on your Mac --
+see README.txt.
+
+
+CREDIT WHERE IT IS DUE
+----------------------
+Almost none of the heavy lifting here is original. This project is a thin
+layer on top of other people's work:
+
+  Dolphin Emulator Project
+    The runtime is Dolphin. Graphics, audio, input, savestates, the GameCube
+    hardware emulation and the Vulkan backend are all theirs. The settings
+    overlay is drawn with Dolphin's existing ImGui integration.
+    GPL-2.0-or-later -- https://dolphin-emu.org
+
+  ExpansionPak - ModernGekko
+    The chassis that hosts a statically recompiled game inside Dolphin, and
+    the StaticRecomp CPU core that hands execution between recompiled code
+    and the emulator. https://github.com/ExpansionPak/ModernGekko
+
+  ExpansionPak - DolRecomp
+    The static recompiler that translates GameCube PowerPC code into C. It
+    ships here prebuilt as tools/dolrecomp; Setup runs it on your disc.
+    GPL-3.0-or-later -- https://github.com/ExpansionPak/DolRecomp
+
+  Dear ImGui (Omar Cornut and contributors)
+    The immediate-mode UI the settings menu is built on. MIT licence.
+
+  FFmpeg
+    Used as a separate program to decode the game's Sofdec video, replacing
+    the software decoder. Not linked into this binary.
+
+  Bandai Namco Entertainment
+    Original game, its code and all its assets. Not included, not
+    redistributed, and not ours. All rights remain theirs.
+
+  Cheat codes
+    Action Replay codes are published community data (Codejunkies, via
+    Almar's Guides). None were written here.
+
+  The r/decomps post that described the recompilation workflow this
+  project followed.
+
+
+LICENCES
+--------
+  Runtime (Dolphin-derived)  GPL-2.0-or-later
+  ModernGekko                GPL
+  DolRecomp                  GPL-3.0-or-later
+  Dear ImGui                 MIT
+
+The GPL requires that anyone receiving these binaries can get the matching
+source. RingOut.app and tools/dolrecomp here are prebuilt, so that applies
+to this whole package. The complete corresponding source is the project repository:
+
+  https://github.com/jackpoison-prog/RingOut
+
+It carries the full ModernGekko and Dolphin trees as plain files, with
+every modification made here already in them, so the tagged commit these
+binaries were built from reproduces them directly. The release these
+binaries came from names that commit.
+
+If you pass this package on, keep this file with it.
+
+Anything built from your disc is derived from the game itself.
+Keep it to yourself.

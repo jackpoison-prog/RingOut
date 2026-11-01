@@ -521,7 +521,9 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     # version-locked to libc), nor the GLIBCXX needed by C++ shared libs we
     # bundle (SFML, fmt, SPIRV-Tools ...). A genuinely portable build has to
     # be produced against an older glibc, e.g. in a Steam Runtime container.
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # Not on macOS: Apple's linker has no such flags (AppleClang matches
+    # "Clang"), and libc++ is part of the OS there, so there is nothing to fold.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT APPLE)
         target_link_options(moderngekko-run PRIVATE -static-libstdc++ -static-libgcc)
     endif()
     # Windows runtime PGO, set by windows.yml: /GENPROFILE to build the
@@ -667,6 +669,17 @@ if(BUILD_TESTING)
                 ModernGekko::Runtime core uicommon)
         endif()
         add_test(NAME moderngekko.netplay_protocol COMMAND moderngekko_netplay_protocol_test)
+
+        # Guest RAM through the memory arena on the host's real page size
+        # (16 KB on Apple Silicon); see the test's header.
+        add_executable(moderngekko_mem_arena_smoke_test tests/mem_arena_smoke_test.cpp)
+        target_include_directories(moderngekko_mem_arena_smoke_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core")
+        get_target_property(_mg_np_defs moderngekko_netplay_protocol_test COMPILE_DEFINITIONS)
+        target_compile_definitions(moderngekko_mem_arena_smoke_test PRIVATE ${_mg_np_defs})
+        get_target_property(_mg_np_libs moderngekko_netplay_protocol_test LINK_LIBRARIES)
+        target_link_libraries(moderngekko_mem_arena_smoke_test PRIVATE ${_mg_np_libs})
+        add_test(NAME moderngekko.mem_arena_smoke COMMAND moderngekko_mem_arena_smoke_test)
     endif()
 
     if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
