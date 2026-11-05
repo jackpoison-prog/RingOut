@@ -10,6 +10,11 @@
 
 #ifndef MODERNGEKKO_NO_SDL_GAMEPADS
 #include <SDL3/SDL.h>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <chrono>
+#include <pthread.h>
+#endif
 #endif
 
 namespace fs = std::filesystem;
@@ -290,22 +295,44 @@ bool GCPadConfigExists(const fs::path &user_directory) {
   return fs::is_regular_file(user_directory / "Config" / "GCPadNew.ini", ec);
 }
 
+HostOs CurrentHostOs() {
+#if defined(_WIN32)
+  return HostOs::Windows;
+#elif defined(__APPLE__)
+  return HostOs::MacOS;
+#else
+  return HostOs::Linux;
+#endif
+}
+
+std::string_view KeyboardDevice(HostOs host) {
+  switch (host) {
+  case HostOs::Windows:
+    // DInput's keyboard/mouse, as enumerated on a real Windows 10 machine.
+    return "DInput/0/Keyboard Mouse";
+  case HostOs::MacOS:
+    // Dolphin's Quartz backend (Quartz.mm, QuartzKeyboardAndMouse.mm). The Mac
+    // build first shipped the X11 name below, a device macOS does not have, so
+    // the keyboard did nothing there (RingOut#20).
+    return "Quartz/0/Keyboard & Mouse";
+  case HostOs::Linux:
+  default:
+    // Dolphin's Linux keyboard/mouse device is the X master pointer/keyboard
+    // pair, exposed by the XInput2 backend under the pointer's name. The game
+    // runs under XWayland here, so this works on a Wayland session too.
+    return "XInput2/0/Virtual core pointer";
+  }
+}
+
 bool WriteKeyboardGCPadConfig(const fs::path &user_directory,
-                              KeyboardLayout layout, std::string *message) {
+                              KeyboardLayout layout, std::string *message,
+                              HostOs host) {
   // The keyboard device and its key NAMES are both platform-specific, and
   // getting either wrong fails silently: Dolphin resolves an absent device or
   // an unknown key to nothing, every control reads unpressed, and no error is
   // logged. That is exactly how this was found on Windows -- the profile below
   // was written with X11 names, so a player had to rebind every key by hand.
-#ifdef _WIN32
-  // DInput's keyboard/mouse, as enumerated on a real Windows 10 machine.
-  constexpr const char *kDevice = "DInput/0/Keyboard Mouse";
-#else
-  // Dolphin's Linux keyboard/mouse device is the X master pointer/keyboard
-  // pair, exposed by the XInput2 backend under the pointer's name. The game
-  // runs under XWayland here, so this works on a Wayland session too.
-  constexpr const char *kDevice = "XInput2/0/Virtual core pointer";
-#endif
+  const std::string kDevice(KeyboardDevice(host));
 
   // Two disjoint layouts, so one keyboard can drive two local instances --
   // which is exactly what a two-peer netplay session on one machine needs, and
@@ -315,23 +342,24 @@ bool WriteKeyboardGCPadConfig(const fs::path &user_directory,
     const char *up, *down, *left, *right;
     const char *a, *b, *x, *y, *z, *l, *r, *start;
   };
-  // Letters are spelled the same on both backends; the arrows, Return and comma
+  // Letters are spelled the same on every backend; the arrows, Return and comma
   // are not. DInput names come from InputCommon/ControllerInterface/DInput/
-  // NamedKeys.h -- UP/DOWN/LEFT/RIGHT/RETURN/COMMA, uppercase -- against X11's
-  // Up/Down/Left/Right/Return/comma.
-#ifdef _WIN32
+  // NamedKeys.h -- UP/DOWN/LEFT/RIGHT/RETURN/COMMA, uppercase; X11's are
+  // Up/Down/Left/Right/Return/comma; Quartz's (QuartzKeyboardAndMouse.mm) are
+  // "Up Arrow" ... "Return" and ",".
+  struct Named {
+    const char *up, *down, *left, *right, *start, *comma;
+  };
+  const Named named =
+      host == HostOs::Windows ? Named{"UP", "DOWN", "LEFT", "RIGHT", "RETURN", "COMMA"}
+      : host == HostOs::MacOS ? Named{"Up Arrow", "Down Arrow", "Left Arrow",
+                                      "Right Arrow", "Return", ","}
+                              : Named{"Up", "Down", "Left", "Right", "Return", "comma"};
   const Keys keys = (layout == KeyboardLayout::Player1)
-                        ? Keys{"UP", "DOWN", "LEFT", "RIGHT", "Z", "X",
-                               "C", "V", "F", "A", "S", "RETURN"}
+                        ? Keys{named.up, named.down, named.left, named.right, "Z", "X",
+                               "C", "V", "F", "A", "S", named.start}
                         : Keys{"I", "K", "J", "L", "B", "N",
-                               "M", "COMMA", "H", "G", "T", "Y"};
-#else
-  const Keys keys = (layout == KeyboardLayout::Player1)
-                        ? Keys{"Up", "Down", "Left", "Right", "Z", "X",
-                               "C", "V", "F", "A", "S", "Return"}
-                        : Keys{"I", "K", "J", "L", "B", "N",
-                               "M", "comma", "H", "G", "T", "Y"};
-#endif
+                               "M", named.comma, "H", "G", "T", "Y"};
 
   const fs::path destination = user_directory / "Config" / "GCPadNew.ini";
   std::error_code ec;
@@ -385,6 +413,45 @@ bool WriteKeyboardGCPadConfig(const fs::path &user_directory,
   return true;
 }
 
+#if !defined(MODERNGEKKO_NO_SDL_GAMEPADS) && defined(__APPLE__)
+namespace {
+// On macOS the pads players actually own -- Xbox, DualSense, DualShock 4, Switch
+// Pro -- reach SDL through Apple's GameController framework, and it reports them
+// a moment AFTER SDL starts: SDL's [GCController controllers] is empty at init
+// and each pad arrives as a connect notification delivered on the main run loop.
+// Asking for the list straight away (as Linux and Windows can) saw no pad, so
+// the profile fell back to the keyboard and the pad never drove the game
+// (RingOut#20). So give the run loop a moment: up to 1.5 s, done as soon as a
+// pad has appeared and the count has held still for a quarter of a second.
+void WaitForLateGamepads() {
+  using clock = std::chrono::steady_clock;
+  const auto deadline = clock::now() + std::chrono::milliseconds(1500);
+  auto settled_since = clock::now();
+  int last = -1;
+  for (;;) {
+    // The notifications are posted on the main thread; pump its run loop when
+    // this is it, otherwise just give the main thread the time.
+    if (pthread_main_np() != 0)
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+    else
+      SDL_Delay(50);
+    SDL_UpdateJoysticks();
+    int count = 0;
+    SDL_free(SDL_GetGamepads(&count));
+    const auto now = clock::now();
+    if (count != last) {
+      last = count;
+      settled_since = now;
+    }
+    if (count > 0 && now - settled_since >= std::chrono::milliseconds(250))
+      return;
+    if (now >= deadline)
+      return;
+  }
+}
+} // namespace
+#endif
+
 std::vector<std::string> DetectSdlGamepads() {
   std::vector<std::string> devices;
 #ifndef MODERNGEKKO_NO_SDL_GAMEPADS
@@ -396,6 +463,9 @@ std::vector<std::string> DetectSdlGamepads() {
   const bool started = SDL_InitSubSystem(SDL_INIT_GAMEPAD);
   if (!started)
     return devices;
+#if defined(__APPLE__)
+  WaitForLateGamepads();
+#endif
 
   int count = 0;
   SDL_JoystickID *const ids = SDL_GetGamepads(&count);
@@ -766,8 +836,19 @@ bool EnsureControllerConfig(const fs::path &user_directory,
   // device. Regenerating that one case repairs an install that already has it
   // without weakening the rule that an existing profile is left alone.
   const std::string existing_port1 = ReadGCPad1Device(user_directory);
+  // Another host's keyboard is the same case: that device can never exist on
+  // this one. Every Mac install written before the keyboard device became
+  // per-host holds the Linux one, and it is why such a keyboard did nothing.
+  const bool names_foreign_keyboard = [&existing_port1] {
+    for (const HostOs host : {HostOs::Linux, HostOs::Windows, HostOs::MacOS}) {
+      if (host != CurrentHostOs() && existing_port1 == KeyboardDevice(host))
+        return true;
+    }
+    return false;
+  }();
   const bool profile_is_unbindable =
-      !existing_port1.empty() && !IsDolphinDeviceName(existing_port1);
+      !existing_port1.empty() &&
+      (!IsDolphinDeviceName(existing_port1) || names_foreign_keyboard);
   if (!GCPadConfigExists(user_directory) || profile_is_unbindable) {
     // An explicitly selected pad wins; otherwise ask the hardware.
     bool from_hardware = false;

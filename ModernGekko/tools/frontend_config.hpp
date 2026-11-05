@@ -49,8 +49,15 @@ bool GCPadConfigExists(const std::filesystem::path &user_directory);
 // game was unplayable without hand-writing one. key_set selects between two
 // disjoint layouts so two local instances can share one keyboard.
 enum class KeyboardLayout { Player1, Player2 };
+// The host whose Dolphin input backends a keyboard profile is written for: each
+// names its keyboard device, and its keys, differently.
+enum class HostOs { Linux, Windows, MacOS };
+HostOs CurrentHostOs();
+// "<source>/0/<name>" of the keyboard on `host` (XInput2, DInput or Quartz).
+std::string_view KeyboardDevice(HostOs host);
 bool WriteKeyboardGCPadConfig(const std::filesystem::path &user_directory,
-                              KeyboardLayout layout, std::string *message);
+                              KeyboardLayout layout, std::string *message,
+                              HostOs host = CurrentHostOs());
 // Write a GCPadNew.ini bound to an SDL gamepad. `device` is a fully qualified
 // Dolphin device name ("SDL/0/<pad name>"); DetectSdlGamepads produces them.
 bool WriteGamepadGCPadConfig(const std::filesystem::path &user_directory,

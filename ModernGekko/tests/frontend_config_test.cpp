@@ -129,7 +129,11 @@ int main() {
     const std::string keyboard_config{
         std::istreambuf_iterator<char>(keyboard_input),
         std::istreambuf_iterator<char>()};
-    if (!keyboard_config.contains("XInput2") ||
+    // This host's keyboard device, not Linux's: the Mac build wrote the X11
+    // name, a device macOS does not have, so its keyboard did nothing (#20).
+    const std::string host_device(moderngekko::frontend::KeyboardDevice(
+        moderngekko::frontend::CurrentHostOs()));
+    if (!keyboard_config.contains("Device = " + host_device + "\n") ||
         keyboard_config.contains("SDL/"))
       return 16;
   } else {
@@ -391,6 +395,71 @@ int main() {
                              std::istreambuf_iterator<char>()};
     if (config != intact)
       return 42;
+  }
+
+  // Each host's keyboard profile names a device and keys that host's Dolphin
+  // backend actually has. Checked for all three here, whatever the host, since
+  // only one of them can ever be exercised by running the game on it.
+  {
+    using moderngekko::frontend::HostOs;
+    using moderngekko::frontend::KeyboardLayout;
+    struct Want {
+      HostOs host;
+      const char *device, *up, *start, *comma;
+    };
+    const Want wants[] = {
+        {HostOs::Linux, "XInput2/0/Virtual core pointer", "Up", "Return", "comma"},
+        {HostOs::Windows, "DInput/0/Keyboard Mouse", "UP", "RETURN", "COMMA"},
+        // Dolphin's Quartz backend: QuartzKeyboardAndMouse.mm's key table.
+        {HostOs::MacOS, "Quartz/0/Keyboard & Mouse", "Up Arrow", "Return", ","},
+    };
+    int code = 50;
+    for (const Want &want : wants) {
+      const fs::path dir = directory / ("host" + std::to_string(code));
+      std::string text[2];
+      for (int layout = 0; layout < 2; ++layout) {
+        if (!moderngekko::frontend::WriteKeyboardGCPadConfig(
+                dir, layout ? KeyboardLayout::Player2 : KeyboardLayout::Player1,
+                &error, want.host))
+          return code;
+        std::ifstream input(dir / "Config" / "GCPadNew.ini");
+        text[layout] = {std::istreambuf_iterator<char>(input),
+                        std::istreambuf_iterator<char>()};
+      }
+      if (moderngekko::frontend::KeyboardDevice(want.host) != want.device)
+        return code + 1;
+      if (!text[0].contains(std::string("Device = ") + want.device + "\n"))
+        return code + 2;
+      if (!text[0].contains(std::string("D-Pad/Up = `") + want.up + "`\n") ||
+          !text[0].contains(std::string("Buttons/Start = `") + want.start + "`\n"))
+        return code + 3;
+      if (!text[1].contains(std::string("Buttons/Y = `") + want.comma + "`\n"))
+        return code + 4;
+      code += 10;
+    }
+  }
+
+  // An install that already holds ANOTHER host's keyboard profile -- every Mac
+  // install from before the fix above, which got the Linux one -- is repaired:
+  // that device can never exist here, so the profile is unbindable, not a
+  // player's choice. Run on whichever host this is, against a foreign keyboard.
+  {
+    using moderngekko::frontend::HostOs;
+    const HostOs here = moderngekko::frontend::CurrentHostOs();
+    const HostOs foreign = here == HostOs::MacOS ? HostOs::Linux : HostOs::MacOS;
+    const fs::path dir = directory / "foreign-keyboard";
+    if (!moderngekko::frontend::WriteKeyboardGCPadConfig(
+            dir, moderngekko::frontend::KeyboardLayout::Player1, &error, foreign))
+      return 80;
+    if (!moderngekko::frontend::EnsureControllerConfig(
+            dir, std::span<const std::string>{}, &error,
+            moderngekko::frontend::LocalMultiplayer::Disabled))
+      return 81;
+    std::ifstream input(dir / "Config" / "GCPadNew.ini");
+    const std::string config{std::istreambuf_iterator<char>(input),
+                             std::istreambuf_iterator<char>()};
+    if (config.contains(std::string(moderngekko::frontend::KeyboardDevice(foreign))))
+      return 82;
   }
 
   fs::remove_all(directory);
