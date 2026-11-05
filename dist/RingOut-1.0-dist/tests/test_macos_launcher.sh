@@ -14,7 +14,10 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 ROOT="$T/Ring Out"
 MACOS="$ROOT/RingOut.app/Contents/MacOS"
 mkdir -p "$MACOS"
-${CC:-cc} -O2 -Wall -Wextra -Werror -o "$MACOS/RingOut" "$DIST/macos/launcher.c" || { echo "FAIL compile"; exit 1; }
+# The alert is CoreFoundation's on a Mac; elsewhere it compiles out.
+[ "$(uname)" = Darwin ] && FRAMEWORKS=(-framework CoreFoundation) || FRAMEWORKS=()
+${CC:-cc} -O2 -Wall -Wextra -Werror -o "$MACOS/RingOut" "$DIST/macos/launcher.c" "${FRAMEWORKS[@]}" \
+    || { echo "FAIL compile"; exit 1; }
 cat > "$MACOS/moderngekko-run" <<'SH'
 #!/bin/sh
 printf '%s\n' "$@" > "$STUB_ARGS"
