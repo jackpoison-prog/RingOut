@@ -10,7 +10,9 @@ fail=0
 check() { # name expected actual
     if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: want '$2', got '$3'"; fail=1; fi
 }
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+# Resolved: the launcher resolves its own path (as the script's `pwd -P` did),
+# and on a Mac the temp dir is under /var, a link to /private/var.
+T="$(cd "$(mktemp -d)" && pwd -P)"; trap 'rm -rf "$T"' EXIT
 ROOT="$T/Ring Out"
 MACOS="$ROOT/RingOut.app/Contents/MacOS"
 mkdir -p "$MACOS"
