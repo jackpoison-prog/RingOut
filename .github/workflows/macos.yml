@@ -148,6 +148,11 @@ jobs:
           # It exits 2 on the unknown flag, which pipefail would report as the failure.
           "$P/RingOut.app/Contents/MacOS/moderngekko-run" --no-such-flag > usage.txt 2>&1 || true
           grep -q 'usage: moderngekko-run' usage.txt
+          # The Finder entry point: a Mach-O that finds the folder and starts the runtime.
+          file "$P/RingOut.app/Contents/MacOS/RingOut" | grep -q 'Mach-O 64-bit executable arm64'
+          bash "$GITHUB_WORKSPACE/dist/RingOut-1.0-dist/tests/test_macos_launcher.sh"
+          RINGOUT_LAUNCHER_NO_ALERT=1 "$P/RingOut.app/Contents/MacOS/RingOut" > launcher.txt 2>&1 || true
+          grep -q 'Ring Out is not set up yet' launcher.txt
 
       - name: Upload the package for a check
         # One day: the toolchain makes this large, and the private repo's

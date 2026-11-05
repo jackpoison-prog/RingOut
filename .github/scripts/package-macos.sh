@@ -46,7 +46,12 @@ mkdir -p "$APP/MacOS" "$APP/Frameworks" "$APP/Resources" \
 echo "==> RingOut.app"
 RUNTIME="$(one /moderngekko-run)"
 install -m 755 "$RUNTIME" "$APP/MacOS/moderngekko-run"
-install -m 755 "$SRC/macos/RingOut" "$APP/MacOS/RingOut"
+# The entry point is a compiled stub, not a script: Finder does not launch an
+# app whose executable is a script (#20). The linker signs it ad hoc on arm64.
+cc -O2 -Wall -Wextra -Werror -arch arm64 -mmacosx-version-min=13.0 \
+    -framework CoreFoundation -o "$APP/MacOS/RingOut" "$SRC/macos/launcher.c"
+file "$APP/MacOS/RingOut" | grep -q 'Mach-O 64-bit executable arm64' || {
+    echo "  FAIL: RingOut.app's entry point is not an arm64 Mach-O executable" >&2; exit 1; }
 sed "s/@VERSION@/$VERSION/g" "$SRC/macos/Info.plist" > "$APP/Info.plist"
 cp -R "$REPO/ModernGekko/vendor/dolphin/Data/Sys" "$APP/Resources/Sys"
 install -m 755 "$(one /Package/Release/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib)" \
