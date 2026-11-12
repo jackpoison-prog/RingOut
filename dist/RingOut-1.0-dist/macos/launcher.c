@@ -133,6 +133,17 @@ int main(int argc, char **argv) {
       close(fd);
   }
 
+  /* The intro movies play through an ffmpeg program found on PATH, and an app
+   * Finder starts gets only /usr/bin:/bin:/usr/sbin:/sbin -- never where
+   * Homebrew or MacPorts put it -- so the intro was black with its sound
+   * playing (RingOut#20). Look there too, and in the Ring Out folder's bin/. */
+  const char *old_path = getenv("PATH");
+  char new_path[4 * PATH_MAX];
+  const int pn = snprintf(new_path, sizeof new_path, "%s%s%s/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin",
+                          old_path && *old_path ? old_path : "/usr/bin:/bin:/usr/sbin:/sbin", ":", root);
+  if (pn > 0 && (size_t)pn < sizeof new_path)
+    setenv("PATH", new_path, 1);
+
   char **args = calloc((size_t)argc + 8, sizeof *args);
   if (args == NULL)
     return 1;

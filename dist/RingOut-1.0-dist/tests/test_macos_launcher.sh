@@ -23,6 +23,7 @@ ${CC:-cc} -O2 -Wall -Wextra -Werror -o "$MACOS/RingOut" "$DIST/macos/launcher.c"
 cat > "$MACOS/moderngekko-run" <<'SH'
 #!/bin/sh
 printf '%s\n' "$@" > "$STUB_ARGS"
+printf '%s\n' "$PATH" > "$STUB_ARGS.path"
 echo "runtime stdout"; echo "runtime stderr" >&2
 exit 7
 SH
@@ -48,6 +49,11 @@ $ROOT/bin/gGRSEAF_recomp.dylib
 check "arguments (paths with a space, -psn_ dropped)" "$want" "$(cat "$STUB_ARGS")"
 check "log gets stdout and stderr" "runtime stdout
 runtime stderr" "$(cat "$ROOT/userdata/launch.log")"
+
+# the intro movies' ffmpeg: Finder's PATH lacks Homebrew/MacPorts, so the launcher adds them (RingOut#20)
+check "PATH keeps what it had, then the folder's bin/ and Homebrew/MacPorts" \
+    "/usr/bin:/bin:$ROOT/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin" \
+    "$(cd / && PATH=/usr/bin:/bin "$MACOS/RingOut" >/dev/null 2>&1; cat "$STUB_ARGS.path")"
 
 # ---- RINGOUT_LOG_NAME, and started through a symlink
 ln -s "$MACOS/RingOut" "$T/link"

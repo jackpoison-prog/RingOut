@@ -29,6 +29,17 @@ UNSIGNED
   afterwards. If you prefer to do it yourself, in Terminal:
       xattr -dr com.apple.quarantine /path/to/this/folder
 
+KEYS
+  Esc             the in-game menu (pauses)    Shift+Esc  quit
+  Option+Return   fullscreen                   Option+W   16:9 on/off
+  hold Tab        fast forward
+
+INTRO MOVIES
+  The game's movies play through ffmpeg, which Ring Out does not ship.
+  Without it they are black (with sound) and the game carries on. To
+  get them, install it with Homebrew (https://brew.sh):
+      brew install ffmpeg
+
 NETPLAY
   Netplay works Mac to Mac. A Mac and a PC cannot play each other yet:
   the two refuse at connect with a message saying so.
