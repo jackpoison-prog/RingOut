@@ -6,10 +6,12 @@
 #include "Common/MsgHandler.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
+#include "Core/RecompWidescreen.h"
 #include "Core/State.h"
 #include "Core/System.h"
 #include "VideoCommon/EFBInterface.h"
 #include "VideoCommon/Present.h"
+#include "VideoCommon/RecompMenu.h"
 
 #include <AppKit/AppKit.h>
 #include <Carbon/Carbon.h>
@@ -178,6 +180,10 @@ public:
 
 private:
   void ProcessEvents();
+  // RingOut's keys (the same set as PlatformX11/Wayland/Win32). True when the event was ours and
+  // must not reach AppKit (which would beep, or leave native fullscreen on Escape).
+  bool HandleKey(NSEvent* event);
+  void ToggleFullscreen();
   void UpdateWindowPosition();
   void HandleSaveStates(NSUInteger key, NSUInteger flags);
   void SetupMenu();
@@ -202,6 +208,11 @@ PlatformMacOS::~PlatformMacOS()
 
 bool PlatformMacOS::Init()
 {
+  // Fullscreen and quit are window-system operations the overlay can't perform itself, so hand it
+  // callbacks into this platform. The overlay calls them from OnKey, on this (the main) thread.
+  RecompMenu::SetFullscreenCallback([this] { ToggleFullscreen(); });
+  RecompMenu::SetQuitCallback([this] { RequestShutdown(); });
+
   [Application sharedApplication];
 
   m_app_delegate = [[AppDelegate alloc] initWithPlatform:this];
@@ -286,7 +297,110 @@ void PlatformMacOS::MainLoop()
     Core::HostDispatchJobs(Core::System::GetInstance());
     ProcessEvents();
     UpdateWindowPosition();
+
+    RecompMenu::HostTick();
+    // While the menu is up emulation is paused, so nothing drives presentation and the overlay
+    // would freeze. Redraw it here at roughly 60Hz instead.
+    if (RecompMenu::IsOpen())
+    {
+      RecompMenu::PumpFrame();
+      std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      continue;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
+}
+
+void PlatformMacOS::ToggleFullscreen()
+{
+  [m_window toggleFullScreen:nil];
+}
+
+bool PlatformMacOS::HandleKey(NSEvent* event)
+{
+  const NSEventType type = [event type];
+  if (type != NSEventTypeKeyDown && type != NSEventTypeKeyUp)
+    return false;
+  const unsigned short key = [event keyCode];
+  const NSEventModifierFlags mods = [event modifierFlags];
+  const bool option = (mods & NSEventModifierFlagOption) != 0;
+  const bool shift = (mods & NSEventModifierFlagShift) != 0;
+  const bool command = (mods & NSEventModifierFlagCommand) != 0;
+
+  if (type == NSEventTypeKeyUp)
+  {
+    if (key == kVK_Tab)
+    {
+      RecompMenu::SetFastForward(false);
+      return true;
+    }
+    return false;
+  }
+
+  // Hold Tab = unlimited speed (key repeats only re-assert it); Cmd+Tab stays the system's.
+  if (key == kVK_Tab && !command && !option)
+  {
+    RecompMenu::SetFastForward(true);
+    return true;
+  }
+  // Escape opens the settings overlay (and pauses); Shift+Escape quits.
+  if (key == kVK_Escape)
+  {
+    if ([event isARepeat])
+      return true;
+    if (shift)
+      RequestShutdown();
+    else
+      RecompMenu::OnEscape();
+    return true;
+  }
+  if (RecompMenu::IsOpen())
+  {
+    // The overlay owns input: navigate it and swallow everything else.
+    switch (key)
+    {
+    case kVK_UpArrow:
+      RecompMenu::OnKey(RecompMenu::Key::Up);
+      break;
+    case kVK_DownArrow:
+      RecompMenu::OnKey(RecompMenu::Key::Down);
+      break;
+    case kVK_LeftArrow:
+      RecompMenu::OnKey(RecompMenu::Key::Left);
+      break;
+    case kVK_RightArrow:
+      RecompMenu::OnKey(RecompMenu::Key::Right);
+      break;
+    case kVK_Space:
+    case kVK_Return:
+    case kVK_ANSI_KeypadEnter:
+      if (![event isARepeat])
+        RecompMenu::OnKey(RecompMenu::Key::Activate);
+      break;
+    case kVK_ForwardDelete:
+    case kVK_Delete:  // the Mac's "delete" key is backspace; a laptop has no forward delete
+      if (![event isARepeat])
+        RecompMenu::OnKey(RecompMenu::Key::Delete);
+      break;
+    default:
+      break;
+    }
+    return true;
+  }
+  // Option is the Mac's Alt: Option+Return = fullscreen, Option+W = 16:9, as Alt does elsewhere.
+  if (option && !command && (key == kVK_Return || key == kVK_ANSI_KeypadEnter))
+  {
+    if (![event isARepeat])
+      ToggleFullscreen();
+    return true;
+  }
+  if (option && !command && key == kVK_ANSI_W)
+  {
+    if (![event isARepeat] && RecompWidescreen::Toggle())
+      Config::Save();
+    return true;
+  }
+  return false;
 }
 
 WindowSystemInfo PlatformMacOS::GetWindowSystemInfo() const
@@ -305,13 +419,27 @@ void PlatformMacOS::ProcessEvents()
 {
   @autoreleasepool
   {
-    NSDate* expiration = [NSDate dateWithTimeIntervalSinceNow:1];
-    NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                        untilDate:expiration
-                                           inMode:NSDefaultRunLoopMode
-                                          dequeue:YES];
-
-    [NSApp sendEvent:event];
+    // Drain what is pending without waiting: MainLoop paces itself (and must keep pumping the
+    // overlay while the game is paused), where the stock loop blocked here for up to a second.
+    while (NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                               untilDate:[NSDate distantPast]
+                                                  inMode:NSDefaultRunLoopMode
+                                                 dequeue:YES])
+    {
+      if (HandleKey(event))
+        continue;
+      // Other keys: menu shortcuts (Cmd+Q, the F-key states) still work, and the rest stop here.
+      // The game reads the keyboard by polling (QuartzKeyboardAndMouse, CGEventSourceKeyState),
+      // and a key event no view accepts makes AppKit beep on every press.
+      if ([event type] == NSEventTypeKeyDown)
+      {
+        [[NSApp mainMenu] performKeyEquivalent:event];
+        continue;
+      }
+      if ([event type] == NSEventTypeKeyUp)
+        continue;
+      [NSApp sendEvent:event];
+    }
 
     // Need to update if m_window becomes fullscreen
     m_window_fullscreen = [m_window styleMask] & NSWindowStyleMaskFullScreen;
@@ -327,6 +455,9 @@ void PlatformMacOS::ProcessEvents()
     }
     else
     {
+      // Losing focus mid-hold means the Tab release will never arrive.
+      if (m_window_focus)
+        RecompMenu::SetFastForward(false);
       m_window_focus = false;
       if (Config::Get(Config::MAIN_SHOW_CURSOR) == Config::ShowCursor::Never)
         [NSCursor hide];
