@@ -1,5 +1,7 @@
 #include "netplay_compatibility.hpp"
 
+#include "Core/RecompGuest.h"
+
 #include "Common/Crypto/SHA1.h"
 #include "Common/Version.h"
 #include "VideoCommon/RecompGameData.h"
@@ -7,6 +9,7 @@
 #include "moderngekko/module_loader.hpp"
 
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -76,6 +79,7 @@ const char *HostPlatformName() {
 std::string CompatibilityFingerprint(const RuntimeConfig &config,
                                      const GameMetadata &game) {
   std::string module = "interpreter";
+  bool guest_sites = false;  // the module has every code site the installed guests need
   if (config.module.kind != ModuleSource::Kind::None) {
     const ModernGekkoModuleRequirements requirements = {
         MODERNGEKKO_CPU_ABI_VERSION,
@@ -89,6 +93,9 @@ std::string CompatibilityFingerprint(const RuntimeConfig &config,
     }
     if (loaded.status == ModuleLoadStatus::Ok) {
       module = DescriptorFingerprint(*library->GetDescriptor());
+      const auto* groups =
+          static_cast<const std::uint32_t*>(library->GetSymbol("staticrecomp_gate_groups"));
+      guest_sites = RecompGuest::ModuleRunsGuests(groups ? *groups : 0u);
 #if defined(_WIN32)
       if (config.module.kind == ModuleSource::Kind::DynamicPath)
         PinnedModuleLibraries().push_back(std::move(library));
@@ -104,12 +111,19 @@ std::string CompatibilityFingerprint(const RuntimeConfig &config,
   // reach guest RAM, so they are part of what has to agree.
   // -8: the platform is the SECOND field, where the server looks for it to
   // refuse a Mac joining a PC with that reason instead of "differently built".
-  return std::string("moderngekko-netplay-8|") + HostPlatformName() + "|" +
+  // -9: the guest characters. With them on, one peer's RAM gets their select cells and character
+  // pools and its disc serves their archive in place of root.olk, so peers must agree on whether
+  // guests are on AND on which build of them (the same guests from different discs differ).
+  const char* const guests_env = std::getenv("RINGOUT_GUESTS");
+  const bool guests_on =
+      RecompGuest::IsAvailable() && guest_sites && !(guests_env && guests_env[0] == '0');
+  const std::string guests = guests_on ? "guests:" + RecompGuest::GuestsHash() : "noguests";
+  return std::string("moderngekko-netplay-9|") + HostPlatformName() + "|" +
          Common::GetScmRevGitStr() + "|" +
          game.disc_id + "|" + game.dol_sha256 + "|" +
          RecompGameData::Fingerprint() + "|" +
          std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|" +
          std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" +
-         std::to_string(sizeof(CPUState)) + "|" + module;
+         std::to_string(sizeof(CPUState)) + "|" + module + "|" + guests;
 }
 } // namespace moderngekko::frontend

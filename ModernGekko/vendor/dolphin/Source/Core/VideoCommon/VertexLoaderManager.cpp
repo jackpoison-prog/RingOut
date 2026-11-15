@@ -27,6 +27,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/NativeVertexFormat.h"
+#include "VideoCommon/Present.h"
 #include "VideoCommon/RecompOrthoSqueeze.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexLoaderBase.h"
@@ -398,11 +399,13 @@ static bool CanSplit(OpcodeDecoder::Primitive primitive)
 }
 
 // Screen shape: the x extent, in clip space before any squeeze, of an
-// orthographic draw, so a full-screen overlay can be told from the HUD. Loads
+// orthographic draw, so a full-screen overlay or a border strip can be told
+// from the HUD. Loads
 // the vertices into scratch first -- the batch they would join must be flushed
 // before the exemption changes. Positions come out of the loader as floats,
 // after a u32 matrix index when the format carries one (as CPUCull reads them).
-static bool OrthoDrawCoversFullWidth(VertexLoaderBase* loader, const u8* src, int count)
+static bool OrthoDrawExtent(VertexLoaderBase* loader, const u8* src, int count, float* lo_out,
+                            float* hi_out)
 {
   static std::vector<u8> scratch;
   const u32 stride = loader->m_native_vtx_decl.stride;
@@ -430,7 +433,9 @@ static bool OrthoDrawCoversFullWidth(VertexLoaderBase* loader, const u8* src, in
     lo = std::min(lo, clip_x);
     hi = std::max(hi, clip_x);
   }
-  return loaded > 0 && RecompOrthoSqueeze::CoversFullWidth(lo, hi);
+  *lo_out = lo;
+  *hi_out = hi;
+  return loaded > 0;
 }
 
 template <bool IsPreprocess>
@@ -470,14 +475,46 @@ int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int coun
     }
 
     // Screen shape: a full-screen 2D overlay keeps the whole width while the
-    // HUD around it is narrowed to 16:9 (RecompOrthoSqueeze.h).
+    // HUD around it is narrowed to 16:9, and so does an effect the game projected
+    // from the 3D scene (StaticRecompRenderLayerHook.h).
     {
       auto& vsm = Core::System::GetInstance().GetVertexShaderManager();
-      const bool full = vsm.OrthoSqueezeWouldApply() && OrthoDrawCoversFullWidth(loader, src, count);
-      if (full != vsm.IsOrthoFullWidth())
+      bool full = false;
+      RecompOrthoSqueeze::EdgeMap edge;
+      if (vsm.OrthoSqueezeWouldApply())
+      {
+        float lo, hi;
+        if (vsm.InSceneEffect())
+          full = true;
+        else if (OrthoDrawExtent(loader, src, count, &lo, &hi))
+        {
+          full = RecompOrthoSqueeze::CoversFullWidth(lo, hi) ||
+                 RecompOrthoSqueeze::IsBackgroundTile(lo, hi);
+          if (!full)
+          {
+            // Video thread only, like the rest of this block.
+            static RecompOrthoSqueeze::Anchor s_anchor;
+            const float k = RecompOrthoSqueeze::g_factor.load(std::memory_order_relaxed);
+            const int frame = g_presenter ? g_presenter->FrameCount() : 0;
+            const bool filled = primitive < OpcodeDecoder::Primitive::GX_DRAW_LINES;
+            edge = RecompOrthoSqueeze::OnAnchor(lo, hi, filled ? static_cast<unsigned>(count) : 0u,
+                                                s_anchor, k, frame);
+            if (!edge.on)
+            {
+              edge = RecompOrthoSqueeze::EdgeAnchor(lo, hi, k);
+              if (edge.on)
+                s_anchor = {edge, lo, hi, k, frame};
+            }
+          }
+        }
+      }
+      const RecompOrthoSqueeze::EdgeMap& was = vsm.OrthoEdge();
+      if (full != vsm.IsOrthoFullWidth() || edge.on != was.on || edge.a != was.a ||
+          edge.b != was.b)
       {
         g_vertex_manager->Flush();
         vsm.SetOrthoFullWidth(full);
+        vsm.SetOrthoEdge(edge);
       }
     }
 

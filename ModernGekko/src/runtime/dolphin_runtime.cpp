@@ -32,6 +32,7 @@
 #include "UICommon/UICommon.h"
 #include "VideoCommon/PerformanceMetrics.h"
 #include "VideoCommon/RecompGameData.h"
+#include "Core/RecompGuest.h"
 #include "VideoCommon/RecompMenu.h"
 #include "VideoCommon/VideoConfig.h"
 #include "dolphin_runtime_internal.hpp"
@@ -368,6 +369,12 @@ std::optional<RuntimeError> ResolveModuleSource(RuntimeConfig &config,
       return RuntimeError{RuntimeErrorCode::ModuleRejected, std::move(message)};
     }
     config.module = {};
+  }
+  // The guests' code sites exist only in a module built by setup.sh --spawn/--heihachi (gate group 1).
+  {
+    const auto* groups =
+        static_cast<const std::uint32_t*>(validation_library.GetSymbol("staticrecomp_gate_groups"));
+    RecompGuest::SetModuleGateGroups(groups ? *groups : 0u);
   }
   validation_library.Close();
   return {};
@@ -973,6 +980,8 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   // expensive the first time and after an actual patch.
   RecompGameData::Initialize(impl->config.game_root.string(),
                              impl->config.user_directory.string());
+  // Guest characters are trusted only when their archive was built from THIS root.olk.
+  RecompGuest::Initialize(impl->config.game_root.string(), RecompGameData::Get().current);
 
   impl->platform = CreateHostPlatform(impl->config);
   if (!impl->platform || !impl->platform->Init()) {
@@ -1026,6 +1035,13 @@ RuntimeRunResult Runtime::Run() {
             RuntimeError{RuntimeErrorCode::InvalidState,
                          "runtime is already running"}};
 
+  // The guests' session is decided BEFORE the boot parameters exist: generating them builds the disc
+  // from the game folder, and that is when root.olk is bound to a host file. On whenever their data
+  // is installed and valid; RINGOUT_GUESTS=0 turns them off.
+  {
+    const char* const env = std::getenv("RINGOUT_GUESTS");
+    RecompGuest::SetSession(!(env && env[0] == '0'));
+  }
   std::unique_ptr<BootParameters> boot =
       TakeBootParameters(m_impl->metadata.main_dol.string());
   if (!boot) {

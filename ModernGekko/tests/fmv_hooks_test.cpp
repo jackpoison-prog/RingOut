@@ -2,11 +2,12 @@
 //
 // Beyond the lookup itself, this checks the table against setup.sh AND
 // setup.ps1: every disc whose row the runtime can use must pass exactly its six
-// hook PCs as --dispatch-pc, or --direct-calls jumps straight past them and the
+// hook PCs as --dispatch-pc (and its two render-layer hooks as --gated-pc), or --direct-calls jumps straight past them and the
 // hook never fires. The three lists live in three languages, so nothing else
 // keeps them in step.
 
 #include "StaticRecompFmvHooks.h"
+#include "StaticRecompRenderLayerHook.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -43,12 +44,14 @@ std::string ReadFile(const char* path) {
   return ss.str();
 }
 
-// The --dispatch-pc values in the case arm of setup.sh that names disc_id.
-std::set<std::uint32_t> SetupDispatchPcs(const std::string& text, const std::string& disc_id) {
+// The values of `flag` (--dispatch-pc or --gated-pc) in the case arm of
+// setup.sh that names disc_id.
+std::set<std::uint32_t> SetupPcs(const std::string& text, const std::string& disc_id,
+                                 const std::string& flag) {
   std::set<std::uint32_t> out;
   // Arms look like `GRSEAF|GRSEPS) LEADER_CASES+=(--direct-calls ... );;`.
   static const std::regex arm(R"(\n([A-Z0-9|]+)\) LEADER_CASES\+=\(--direct-calls([^;]*)\);;)");
-  static const std::regex pc(R"(--dispatch-pc (0x[0-9A-Fa-f]+))");
+  const std::regex pc(flag + R"( (0x[0-9A-Fa-f]+))");
   for (std::sregex_iterator it(text.begin(), text.end(), arm), end; it != end; ++it) {
     const std::string ids = "|" + (*it)[1].str() + "|";
     if (ids.find("|" + disc_id + "|") == std::string::npos)
@@ -62,10 +65,11 @@ std::set<std::uint32_t> SetupDispatchPcs(const std::string& text, const std::str
 
 // The same for setup.ps1, whose blocks look like
 // `elseif ($DiscId -eq 'GRSPAF') {\n ... '--dispatch-pc', '0x...', ... \n}`.
-std::set<std::uint32_t> SetupPs1DispatchPcs(const std::string& text, const std::string& disc_id) {
+std::set<std::uint32_t> SetupPs1Pcs(const std::string& text, const std::string& disc_id,
+                                    const std::string& flag) {
   std::set<std::uint32_t> out;
   static const std::regex block(R"((?:if|elseif) \(([^\n{]*)\) \{\n([\s\S]*?)\n\})");
-  static const std::regex pc(R"('--dispatch-pc', '(0x[0-9A-Fa-f]+)')");
+  const std::regex pc("'" + flag + R"(', '(0x[0-9A-Fa-f]+)')");
   for (std::sregex_iterator it(text.begin(), text.end(), block), end; it != end; ++it) {
     if ((*it)[1].str().find("'" + disc_id + "'") == std::string::npos)
       continue;
@@ -107,23 +111,46 @@ int main() {
 
   const std::string setup = ReadFile(RINGOUT_SETUP_SH);
   const std::string setup_ps1 = ReadFile(RINGOUT_SETUP_PS1);
+  // The scene-effect hooks (StaticRecompRenderLayerHook.h) are passed as
+  // --gated-pc, beside the movie player's six --dispatch-pc, on the discs with
+  // screen shapes: native until the run loop arms the gate.
+  Check(StaticRecompFindRenderLayerHooks("GRSEAF").layer_pc == 0x80020348u, "US layer hook");
+  Check(StaticRecompFindRenderLayerHooks("GRSEAF").item_pc == 0x8001F804u, "US item hook");
+  Check(StaticRecompFindRenderLayerHooks("GRSEPS").item_pc == 0x8001F804u, "Plus item hook");
+  Check(StaticRecompFindRenderLayerHooks("GRSPAF").item_pc == 0x8001F9D8u, "PAL item hook");
+  Check(StaticRecompFindRenderLayerHooks("GRSJAF").layer_pc == kStaticRecompNoLayerHook,
+        "JP has no layer hook");
+  Check(StaticRecompIsSceneEffect(false, 2, 1, 2), "layer-2 effect sprite");
+  Check(!StaticRecompIsSceneEffect(false, 6, 1, 2), "HUD layer is never an effect");
+  Check(StaticRecompIsSceneEffect(true, 6, 1, 6), "per-view drawer after the HUD layer");
+  Check(!StaticRecompIsSceneEffect(false, 2, 3, 2), "three-stage menu panel");
+  Check(!StaticRecompIsSceneEffect(false, 2, 1, 1), "setup-1 menu panel");
   for (const auto& row : kStaticRecompFmvHookTable) {
     const auto want = AsSet(row.pcs);
-    if (SetupDispatchPcs(setup, row.game_id) != want) {
-      std::fprintf(stderr, "FAIL: setup.sh's --dispatch-pc list for %s is not its six hooks\n",
+    std::set<std::uint32_t> want_gated;
+    const StaticRecompRenderLayerHooks layer = StaticRecompFindRenderLayerHooks(row.game_id);
+    if (layer.layer_pc != kStaticRecompNoLayerHook)
+      want_gated = {layer.layer_pc, layer.item_pc};
+    if (SetupPcs(setup, row.game_id, "--dispatch-pc") != want ||
+        SetupPcs(setup, row.game_id, "--gated-pc") != want_gated) {
+      std::fprintf(stderr, "FAIL: setup.sh's --dispatch-pc / --gated-pc lists for %s are not its hooks\n",
                    row.game_id);
       ++g_failures;
     }
-    if (SetupPs1DispatchPcs(setup_ps1, row.game_id) != want) {
-      std::fprintf(stderr, "FAIL: setup.ps1's --dispatch-pc list for %s is not its six hooks\n",
+    if (SetupPs1Pcs(setup_ps1, row.game_id, "--dispatch-pc") != want ||
+        SetupPs1Pcs(setup_ps1, row.game_id, "--gated-pc") != want_gated) {
+      std::fprintf(stderr, "FAIL: setup.ps1's --dispatch-pc / --gated-pc lists for %s are not its hooks\n",
                    row.game_id);
       ++g_failures;
     }
   }
   // A disc with no row must not pass any: they would only make unrelated code
   // dispatcher-reachable.
-  Check(SetupDispatchPcs(setup, "GRSJAF").empty(), "JP passes no --dispatch-pc (setup.sh)");
-  Check(SetupPs1DispatchPcs(setup_ps1, "GRSJAF").empty(), "JP passes no --dispatch-pc (setup.ps1)");
+  Check(SetupPcs(setup, "GRSJAF", "--dispatch-pc").empty() && SetupPcs(setup, "GRSJAF", "--gated-pc").empty(),
+        "JP passes no hook PCs (setup.sh)");
+  Check(SetupPs1Pcs(setup_ps1, "GRSJAF", "--dispatch-pc").empty() &&
+            SetupPs1Pcs(setup_ps1, "GRSJAF", "--gated-pc").empty(),
+        "JP passes no hook PCs (setup.ps1)");
 
   if (g_failures == 0)
     std::puts("fmv_hooks: ok");

@@ -41,6 +41,7 @@
 #include "UICommon/GameFile.h"
 #include "UICommon/UICommon.h"
 #include "netplay_compatibility.hpp"
+#include "Core/RecompGuest.h"
 #include "runtime/dolphin_runtime_internal.hpp"
 
 #include <SDL3/SDL.h>
@@ -910,6 +911,8 @@ int RunNetplayLobby(RuntimeConfig runtime_config, ConfigResult frontend_config,
   // other, and the root.olk field would protect nobody.
   RecompGameData::Initialize(runtime_config.game_root.string(),
                              runtime_config.user_directory.string());
+  // The same for the guests' hash: the fingerprint is taken before Runtime::Create reads their manifest.
+  RecompGuest::Initialize(runtime_config.game_root.string(), RecompGameData::Get().current);
 
   NetPlay::SetGameIdentity(inspected.metadata->disc_id,
                            CompatibilityFingerprint(runtime_config, *inspected.metadata));

@@ -96,6 +96,11 @@ install -m 755 "$SRC/tools/dolrecomp"     "$STAGE/tools/dolrecomp"
 # exactly that with dolrecomp-src.
 install -m 755 "$REPO/dist/shared/gc-art.py" "$STAGE/tools/gc-art.py"
 install -m 755 "$REPO/dist/shared/steam_shortcut.py" "$STAGE/tools/steam_shortcut.py"
+# setup.sh --spawn: the converter that builds Spawn from the player's own Xbox disc (no tests, no data).
+mkdir -p "$STAGE/tools/spawn" "$STAGE/tools/guests" "$STAGE/tools/heihachi"
+install -m 644 "$REPO"/tools/spawn/*.py "$STAGE/tools/spawn/"
+install -m 644 "$REPO"/tools/heihachi/*.py "$STAGE/tools/heihachi/"
+install -m 644 "$REPO"/tools/guests/*.py "$REPO/tools/guests/dspenc.c" "$STAGE/tools/guests/"
 # The route setup.sh --pgo plays to train a profile. Sourced from the same file
 # every perf A/B in this project used, so the profile is trained on the workload
 # the numbers were measured on -- a second copy would drift and nobody would
@@ -130,6 +135,8 @@ if [ -d "$STAGE/module-src/profiles" ]; then
     # <ID>.clangNN.profdata is the same disc trained on clang NN (setup.sh picks it by
     # the player's clang major); strip the suffix before checking the ID.
     case "$id" in *.clang[0-9]*) id="${id%%.clang*}" ;; esac
+    # <ID>.guests[.clangNN].profdata: the same disc built with the guests' gated PCs (--spawn/--heihachi).
+    case "$id" in *.guests) id="${id%.guests}" ;; esac
     # GRSEPS is the SC2 Plus mod. It gets its own file since the US disc's
     # profile is trained with --leader-cases and Plus is built without it.
     case "$id" in
@@ -322,7 +329,7 @@ for forbidden in game work windows source/build bin/gGRSEAF_recomp.so art \
                  userdata/Config userdata/GC userdata/Logs userdata/config.ini; do
   [ -e "$STAGE/$forbidden" ] && { echo "  FAIL: $forbidden is in the stage" >&2; exit 1; }
 done
-if find "$STAGE" -name '*_recomp.so' -o -name '*.gci' -o -name '*.iso' | grep -q .; then
+if find "$STAGE" -name '*_recomp.so' -o -name '*.gci' -o -name '*.iso' -o -name 'root-spawn.*' -o -name 'root-guests.*' | grep -q .; then
   echo "  FAIL: disc-derived files in the stage" >&2; exit 1
 fi
 echo "  no disc-derived content"

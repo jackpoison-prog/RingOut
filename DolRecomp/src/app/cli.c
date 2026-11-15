@@ -61,6 +61,10 @@ void print_usage(const char* argv0) {
         "  --chain-calls                  Emit local bl as a native goto (measured no win; off)\n");
     fprintf(stderr, "  --dispatch-pc <addr>           Guest PC the host hooks by address; calls to it stay\n");
     fprintf(stderr, "                                 dispatcher returns. Repeatable.\n");
+    fprintf(stderr, "  --gated-pc <addr>[@<group>]    Guest PC the host hooks only sometimes: native as\n");
+    fprintf(stderr, "                                 usual, but it returns to the dispatcher while bit\n");
+    fprintf(stderr, "                                 <group> (0-7, default 0) of the module's\n");
+    fprintf(stderr, "                                 dolrecomp_gate_armed is set. Repeatable.\n");
     fprintf(stderr, "  --idle-pc <addr|auto>          Guest PC of the OS idle spin loop; its back-edge stays\n");
     fprintf(stderr, "                                 a dispatcher return so the host can still idle-skip\n");
     fprintf(stderr, "  --map <path>                   Load optional function names from a linker MAP\n");
@@ -351,6 +355,25 @@ int parse_cli(int argc, char** argv, CliOptions* opts) {
             }
             opts->dispatch_pcs[opts->dispatch_pc_count++] =
                 (u32)strtoul(argv[++i], NULL, 0);
+            continue;
+        }
+
+        if (strcmp(arg, "--gated-pc") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "error: --gated-pc needs a guest address\n");
+                return 0;
+            }
+            if (opts->gated_pc_count >= 32) {
+                fprintf(stderr, "error: too many --gated-pc addresses\n");
+                return 0;
+            }
+            u32 pc, group;
+            if (!emit_parse_gated_pc(argv[++i], &pc, &group)) {
+                fprintf(stderr, "error: --gated-pc wants <addr>[@<group 0-7>], got '%s'\n", argv[i]);
+                return 0;
+            }
+            opts->gated_groups[opts->gated_pc_count] = group;
+            opts->gated_pcs[opts->gated_pc_count++] = pc;
             continue;
         }
 

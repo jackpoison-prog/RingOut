@@ -58,15 +58,29 @@ bool VertexShaderManager::OrthoSqueezeWouldApply() const
 
 float VertexShaderManager::OrthoSqueezeNow() const
 {
+  if (xfmem.projection.type != ProjectionType::Orthographic &&
+      !RecompOrthoSqueeze::g_3d_follows_2d.load(std::memory_order_relaxed))
+    return 1.0f;
   if (xfmem.projection.type == ProjectionType::Orthographic && m_ortho_full_width)
     return 1.0f;
+  if (xfmem.projection.type == ProjectionType::Orthographic && m_ortho_edge.on)
+    return m_ortho_edge.a;
   return ShapeFactorForViewport();
+}
+
+float VertexShaderManager::OrthoShiftNow() const
+{
+  if (xfmem.projection.type != ProjectionType::Orthographic || m_ortho_full_width ||
+      !m_ortho_edge.on)
+    return 0.0f;
+  return m_ortho_edge.b;
 }
 
 Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 {
   const auto& rawProjection = xfmem.projection.rawProjection;
   m_ortho_squeeze_loaded = OrthoSqueezeNow();  // 1 unless a wide screen shape
+  m_ortho_shift_loaded = OrthoShiftNow();
 
   switch (xfmem.projection.type)
   {
@@ -132,11 +146,12 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
     ERROR_LOG_FMT(VIDEO, "Unknown projection type: {}", xfmem.projection.type);
   }
 
-  // A wide screen shape keeps the game's 2D -- and 3D the game placed beside
-  // it -- at 16:9 in the middle (RecompOrthoSqueeze.h).
+  // A wide screen shape keeps the game's 2D at 16:9 in the middle
+  // (RecompOrthoSqueeze.h).
   RecompOrthoSqueeze::ApplyToProjection(
       m_projection_matrix.data(), xfmem.projection.type == ProjectionType::Orthographic,
       m_ortho_squeeze_loaded);
+  m_projection_matrix[3] += m_ortho_shift_loaded;
 
   PRIM_LOG("Projection: {} {} {} {} {} {}", rawProjection[0], rawProjection[1], rawProjection[2],
            rawProjection[3], rawProjection[4], rawProjection[5]);
@@ -154,7 +169,7 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
 void VertexShaderManager::SetProjectionMatrix(XFStateManager& xf_state_manager)
 {
   if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty() ||
-      OrthoSqueezeNow() != m_ortho_squeeze_loaded)
+      OrthoSqueezeNow() != m_ortho_squeeze_loaded || OrthoShiftNow() != m_ortho_shift_loaded)
   {
     xf_state_manager.ResetProjection();
     auto corrected_matrix = LoadProjectionMatrix();
@@ -446,7 +461,7 @@ void VertexShaderManager::SetConstants(std::span<const std::string> textures,
 
   if (xf_state_manager.DidProjectionChange() || g_freelook_camera.GetController()->IsDirty() ||
       !projection_actions.empty() || m_projection_graphics_mod_change ||
-      OrthoSqueezeNow() != m_ortho_squeeze_loaded)
+      OrthoSqueezeNow() != m_ortho_squeeze_loaded || OrthoShiftNow() != m_ortho_shift_loaded)
   {
     xf_state_manager.ResetProjection();
     m_projection_graphics_mod_change = !projection_actions.empty();

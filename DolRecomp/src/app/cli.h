@@ -25,6 +25,10 @@ typedef struct {
        must not be chained into native gotos or the hook never fires. */
     u32 dispatch_pcs[32];
     u32 dispatch_pc_count;
+    /* --gated-pc: native like any other PC unless the host arms the gate. */
+    u32 gated_pcs[32];
+    u32 gated_groups[32];   /* the gate bit each one tests (--gated-pc <addr>@<group>) */
+    u32 gated_pc_count;
     int chain_calls;
     int leader_cases;
     unsigned chunk_overhang; // --chunk-overhang <max>: emit past the window to the first exit

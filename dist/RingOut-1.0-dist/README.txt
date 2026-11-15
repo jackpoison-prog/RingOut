@@ -97,6 +97,32 @@ ON A STEAM DECK?
   and SteamOS has about 2.37, so it will not load. That one --deck can only
   tell you about; the fix is to build on Debian 12 or Ubuntu 22.04.
 
+SPAWN (from your Xbox disc)
+  The Xbox release of Soul Calibur II has Spawn as its guest fighter. If
+  you own it too, setup can build him into the US GameCube game from your
+  own Xbox disc image:
+      ./setup.sh --spawn /path/to/xbox.iso /path/to/your/disc.iso
+      ./setup.sh --spawn /path/to/xbox.iso      (add him to this install)
+  The Xbox image can be the US or the PAL release (a region-free patched
+  copy is fine); any other disc is refused. It is read, never changed.
+  He needs the unmodified US GameCube game: remove any mods first. If the
+  disc is refused or the build fails, setup asks whether to carry on
+  without him (with -y it does), and nothing already installed is touched.
+  Adding him to an install (no GameCube disc given) has nothing else to do,
+  so a refusal or a failure there ends setup with an error instead.
+  About a minute; details in work/guests.log. Nothing from either disc is
+  ever part of this package: he is built on your machine, like the game.
+
+HEIHACHI (from your PS2 disc)
+  The PS2 release has Heihachi. If you own it too, setup builds him the
+  same way from your own PS2 disc image (the US release, SLUS-20643):
+      ./setup.sh --heihachi /path/to/ps2.iso /path/to/your/disc.iso
+  Both guests at once:
+      ./setup.sh --spawn /path/to/xbox.iso --heihachi /path/to/ps2.iso /path/to/your/disc.iso
+  Everything above about Spawn holds for him too. A guest already
+  installed is kept only when its image is given again: adding Heihachi to
+  an install that has Spawn needs both --spawn and --heihachi.
+
 REQUIREMENTS
   - A GameCube disc image you already have
   - cmake, ninja, python3, and clang (or gcc)

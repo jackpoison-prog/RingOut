@@ -15,6 +15,7 @@
 #include "Core/PowerPC/JitCommon/JitCache.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompABI.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompFmvHooks.h"
+#include "Core/PowerPC/StaticRecomp/StaticRecompRenderLayerHook.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompModuleSource.h"
 #include "Core/RecompDeterminism.h"
 
@@ -154,6 +155,8 @@ private:
   void OnFmvCnvFrm(u32 handle, u32 desc, u32 dst);
   u32 GuestRead32(u32 addr) const;
   void GuestWrite32(u32 addr, u32 value);
+  void OnRenderLayerHook();
+  void PushLayerMarker(u32 value);
 
   // CPUState hooks (module -> chassis environment). `cpu->external_user_data`
   // is the StaticRecompCore*.
@@ -206,6 +209,30 @@ private:
   // The FMV HLE hook PCs for m_module's disc; all kStaticRecompNoFmvHook (never
   // fire) for a disc with no mapped, enabled row. Set by LoadModule.
   StaticRecompFmvHookPcs m_fmv_pcs;
+  // The scene-effect hooks for m_module's disc (all unset without a row), and
+  // the run loop's view of them: the layer last drawn and the last marker sent.
+  StaticRecompRenderLayerHooks m_layer_hooks;
+  u32 m_render_layer = 0;
+  bool m_scene_effect_marked = false;
+  // Those hooks as DolRecomp --gated-pc (module_export.c): the module's gate,
+  // armed while the screen shape in guest RAM -- its 3D aspect constant, at
+  // m_gate_factor_addr -- is wider than 16:9, the only time the hooks are
+  // needed. Read from RAM, not from the settings, so two netplay peers or a
+  // replay arm it identically: armed, the gated PCs dispatch, and that moves
+  // guest timing. Null without the exports or without a shape table.
+  volatile u32* m_gate_armed = nullptr;
+  volatile u32* m_gate_bypass = nullptr;
+  u32 m_gate_factor_addr = 0;
+  float m_gate_factor_16x9 = 0.0f;
+  bool m_gate_on = false;
+  // Gate group 1 is armed: Spawn is on and his tables are patched (RecompGuest::SitesArmed).
+  bool m_spawn_gate_on = false;
+  u32 m_spawn_sites_seen = 0;  // sites logged once each
+  u32 m_spawn_hooks_seen = 0;  // character-code hooks logged once each
+  // RINGOUT_SPAWN_WATCH=1: arm his sites for every fighter and log the first 64 arrivals (which
+  // fighter reached which site), to show a route exercises them.
+  bool m_spawn_watch = false;
+  u32 m_spawn_watch_lines = 0;
   std::unique_ptr<JitBase> m_fallback_jit;
   // Whether the fallback JIT has run since its cache was last cleared. See
   // ClearCache: clearing an already-empty Jit64 code space still costs 14-16 ms.

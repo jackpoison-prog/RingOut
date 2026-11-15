@@ -67,6 +67,7 @@
 #include "Core/NetPlay/NetPlayClient.h"
 #include "Core/NetPlay/NetPlayProto.h"
 #include "Core/RecompDeterminism.h"
+#include "Core/RecompGuest.h"
 #include "Core/RecompWidescreen.h"
 #include "Core/Cheats/PatchEngine.h"
 #include "Core/PowerPC/GDBStub.h"
@@ -145,6 +146,9 @@ void FrameUpdateOnCPUThread()
 
   // Same thread and cadence, for the same reason: it reads and writes guest RAM.
   RecompWidescreen::OnFrame(Core::System::GetInstance());
+
+  // Same again: Spawn's table rows go into guest RAM once per boot, while he is on.
+  RecompGuest::OnFrame(Core::System::GetInstance());
 }
 
 void OnFrameEnd(Core::System& system)

@@ -46,12 +46,18 @@ struct Constant
   std::uint32_t address;
   std::uint32_t original_bits;  // exactly what the disc's DOL holds
   Role role;
+  // Kept at 16:9 while the face-off screen is up (two fighters and their
+  // names, before a stage): the game places those fighters through the HUD
+  // inverse map, and at its wide value they land past their names -- off the
+  // screen at 32:9. At 16:9 each stands over its name, the GPU narrowing the
+  // screen's 2D and 3D alike (RecompOrthoSqueeze::g_3d_follows_2d).
+  bool face_off_16x9 = false;
 };
 
 struct Table
 {
   std::string_view game_id;
-  std::array<Constant, 5> constants;
+  std::array<Constant, 4> constants;
 };
 
 using ReadU32 = std::uint32_t (*)(void* ctx, std::uint32_t address);
@@ -73,22 +79,27 @@ namespace detail
 // USA and SC2 Plus share one layout (Plus checked on its own dump for the
 // native 16:9 work). 0x804615F8 (0.8 at 8001A888, purpose unknown) is
 // deliberately absent until an on-screen check says it matters.
-constexpr std::array<Constant, 5> kUsConstants = {{
+//
+// 0x80461500 (0.80556, the 2D squeeze its helpers fn_80016808/16824/16928 apply
+// to positions around x=320) is left at 16:9 on purpose. It places 2D -- the
+// character-select portrait grid among others -- and the GPU already narrows
+// all 2D to 16:9 (VideoCommon/RecompOrthoSqueeze.h), so scaling it too
+// narrowed those positions twice while the sizes shrank once: at 21:9 the
+// portrait frames overlapped their neighbours. PAL's twin is 0x80475640.
+constexpr std::array<Constant, 4> kUsConstants = {{
     {0x804626B0, 0x3F9EE584, Role::Factor},   // 1.24138, 3D aspect (80085174/852F8/85790)
-    {0x80461500, 0x3F4E38E4, Role::Squeeze},  // 0.80556, 2D squeeze (80013704)
-    {0x80464030, 0x3F4E38E4, Role::Squeeze},  // 0.80556, menu/HUD inverse map
-    {0x8046402C, 0xC278E38C, Role::Offset},   // -62.222, menu/HUD inverse map
+    {0x80464030, 0x3F4E38E4, Role::Squeeze, true},  // 0.80556, menu/HUD inverse map
+    {0x8046402C, 0xC278E38C, Role::Offset, true},   // -62.222, menu/HUD inverse map
     {0x80464608, 0x3F4E38E4, Role::Squeeze},  // 0.80556 (80150CB8)
 }};
 
-// PAL: the same five, read from its own DOL by their readers (3 / 5 / 12 / 12 / 1,
+// PAL: the same four, read from its own DOL by their readers (3 / 12 / 12 / 1,
 // as on US). JP has none of these values -- its wide mode is built differently
 // (no IsWide(), no squeeze helpers) -- so it stays at 16:9.
-constexpr std::array<Constant, 5> kPalConstants = {{
+constexpr std::array<Constant, 4> kPalConstants = {{
     {0x80476828, 0x3F9EE584, Role::Factor},   // 1.24138, 3D aspect (80085E18/85F9C/86434)
-    {0x80475640, 0x3F4E38E4, Role::Squeeze},  // 0.80556, 2D squeeze (8001688C)
-    {0x80478228, 0x3F4E38E4, Role::Squeeze},  // 0.80556, menu/HUD inverse map
-    {0x80478224, 0xC278E38C, Role::Offset},   // -62.222, menu/HUD inverse map
+    {0x80478228, 0x3F4E38E4, Role::Squeeze, true},  // 0.80556, menu/HUD inverse map
+    {0x80478224, 0xC278E38C, Role::Offset, true},   // -62.222, menu/HUD inverse map
     {0x80478828, 0x3F4E38E4, Role::Squeeze},  // 0.80556 (8015A9FC)
 }};
 
@@ -139,11 +150,12 @@ inline const Table* FindTable(std::string_view game_id)
   return nullptr;
 }
 
-// The bits a constant holds at shape s. 16:9 is the disc's own value, exactly,
-// so restoring never depends on a float round trip.
-inline std::uint32_t ValueBits(const Constant& c, Shape s)
+// The bits a constant holds at shape s (on the face-off screen if face_off).
+// 16:9 is the disc's own value, exactly, so restoring never depends on a float
+// round trip.
+inline std::uint32_t ValueBits(const Constant& c, Shape s, bool face_off = false)
 {
-  if (s == Shape::Wide16x9)
+  if (s == Shape::Wide16x9 || (face_off && c.face_off_16x9))
     return c.original_bits;
   const double scale = detail::Aspect(s) / detail::Aspect(Shape::Wide16x9);
   const double original = detail::FromBits(c.original_bits);
@@ -163,39 +175,49 @@ inline std::uint32_t ValueBits(const Constant& c, Shape s)
   return detail::ToBits(static_cast<float>(value));
 }
 
-// Which shape guest RAM holds now. nullopt when it is none of ours -- a build
-// these addresses were not taken from, or a half-written batch -- and then
-// nothing may be written.
-inline std::optional<Shape> CurrentShape(const Table& t, ReadU32 read, void* ctx)
+// Which shape guest RAM holds now, and in *face_off whether in its face-off
+// form. nullopt when it is none of ours -- a build these addresses were not
+// taken from, or a half-written batch -- and then nothing may be written.
+inline std::optional<Shape> CurrentShape(const Table& t, ReadU32 read, void* ctx,
+                                         bool* face_off = nullptr)
 {
   for (int i = 0; i < kShapeCount; ++i)
   {
     const Shape s = static_cast<Shape>(i);
-    bool all = true;
-    for (const Constant& c : t.constants)
+    for (const bool fo : {false, true})
     {
-      if (read(ctx, c.address) != ValueBits(c, s))
+      bool all = true;
+      for (const Constant& c : t.constants)
       {
-        all = false;
-        break;
+        if (read(ctx, c.address) != ValueBits(c, s, fo))
+        {
+          all = false;
+          break;
+        }
+      }
+      if (all)
+      {
+        if (face_off)
+          *face_off = fo;
+        return s;
       }
     }
-    if (all)
-      return s;
   }
   return std::nullopt;
 }
 
-// The writes that take RAM to `want`: all five, or none (already there, or not
-// ours to touch).
-inline std::vector<Write> Writes(const Table& t, ReadU32 read, void* ctx, Shape want)
+// The writes that take RAM to `want` (in its face-off form if face_off): all
+// of them, or none (already there, or not ours to touch).
+inline std::vector<Write> Writes(const Table& t, ReadU32 read, void* ctx, Shape want,
+                                 bool face_off = false)
 {
   std::vector<Write> out;
-  const std::optional<Shape> now = CurrentShape(t, read, ctx);
-  if (!now || *now == want)
+  bool now_face_off = false;
+  const std::optional<Shape> now = CurrentShape(t, read, ctx, &now_face_off);
+  if (!now || (*now == want && now_face_off == face_off))
     return out;
   for (const Constant& c : t.constants)
-    out.push_back({c.address, ValueBits(c, want)});
+    out.push_back({c.address, ValueBits(c, want, face_off)});
   return out;
 }
 

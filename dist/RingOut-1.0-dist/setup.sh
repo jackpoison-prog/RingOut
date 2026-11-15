@@ -74,25 +74,98 @@ runtime_path() {
 cpu_count() {
     nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
 }
+
+# Arguments. A function so tests/test_setup_spawn.sh can check it; sets the globals below.
+parse_args() {
+    DECK=0; ISO=""; PGO=0; ASSUME_YES=0; STEAM=ask; CHECK_TOOLCHAIN=0; SPAWN_IMAGE=""; HEIHACHI_IMAGE=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --deck) DECK=1 ;;
+            --pgo)  PGO=1 ;;
+            -y|--yes) ASSUME_YES=1 ;;
+            --add-to-steam) STEAM=yes ;;
+            --no-steam)     STEAM=no ;;
+            --check-toolchain) CHECK_TOOLCHAIN=1 ;;
+            --spawn=*) SPAWN_IMAGE="${1#--spawn=}" ;;
+            --spawn)
+                if [ $# -lt 2 ]; then echo "--spawn needs the path of your Xbox disc image" >&2; return 1; fi
+                SPAWN_IMAGE="$2"; shift ;;
+            --heihachi=*) HEIHACHI_IMAGE="${1#--heihachi=}" ;;
+            --heihachi)
+                if [ $# -lt 2 ]; then echo "--heihachi needs the path of your PS2 disc image" >&2; return 1; fi
+                HEIHACHI_IMAGE="$2"; shift ;;
+            *)      [ -z "$ISO" ] && ISO="$1" ;;
+        esac
+        shift
+    done
+    return 0
+}
+
+# The guests, from the player's own Xbox and PS2 disc images (tools/guests/setup_guests.py does the work and
+# every check; it never touches the install unless the new archive is complete). On a refusal or a failure the
+# player chooses: carry on without them (the default, and what -y or a non-interactive run does) or stop.
+#   guests_step <install> <xbox image or ""> <ps2 image or ""> <assume_yes> [--check-image]
+guests_step() {
+    guests_run "$1" "$2" "$3" ${5:+"$5"} || guests_ask "$4"
+}
+guests_run() { # install xbox ps2 [--check-image] -> the driver's status (0 built/usable, 1 failed, 3 refused)
+    local driver="${RINGOUT_GUESTS_DRIVER:-$1/tools/guests/setup_guests.py}"
+    mkdir -p "$1/work"
+    # The compiler setup probed (one that WORKS: SteamOS ships a clang without C headers) builds the
+    # sound encoder; unset in guests-only mode, where the encoder finds one itself.
+    CC="${CC:-}" python3 "$driver" ${2:+--spawn "$2"} ${3:+--heihachi "$3"} --game "$1/game" --log "$1/work/guests.log" ${4:+"$4"}
+}
+guests_ask() { # assume_yes -> 0 carry on without them, 1 stop
+    local yes="$1" answer
+    if [ "$yes" = 1 ] || [ ! -t 0 ]; then
+        echo "    continuing without the guest fighters"
+        return 0
+    fi
+    printf "  The guest fighters could not be built: continue without them? [Y/n] "
+    read -r answer || answer=""
+    case "$answer" in
+        [Nn]*) return 1 ;;
+    esac
+    return 0
+}
+
+# Whether the installed module was generated with the guests' code sites: gate group 1 (bit 2 of the
+# DOLRECOMP_GATE_GROUPS the recompiler writes into generated.h) and, for Heihachi, group 2 (bit 4).
+# Only a --spawn/--heihachi build has them; one built for Spawn before Heihachi has group 1 only.
+#   module_has_guest_sites <install> [heihachi]
+module_has_guest_sites() {
+    local v need=2
+    [ -n "${2:-}" ] && need=6
+    v="$(sed -n 's/^#define DOLRECOMP_GATE_GROUPS \(0x[0-9A-Fa-f]*\)u$/\1/p' \
+         "$1/work/out/generated/generated.h" 2>/dev/null | head -1)"
+    [ -n "$v" ] && [ $(( v & need )) -eq "$need" ]
+}
+
+# setup.sh --spawn/--heihachi <image> with no GameCube disc: add them to the install that is already here.
+#   guests_only <install> <xbox image or ""> <ps2 image or "">
+guests_only() {
+    if [ ! -f "$1/game/files/root.olk" ]; then
+        echo "Guest-only setup needs an existing install: give your GameCube disc image too." >&2
+        return 1
+    fi
+    if ! module_has_guest_sites "$1" "$3"; then
+        echo "Adding guest fighters rebuilds the game with their code sites, which needs your GameCube disc:" >&2
+        echo "  ./setup.sh <your GameCube disc image> --spawn <your Xbox disc image> --heihachi <your PS2 disc image>" >&2
+        echo "  (either guest on its own works too)" >&2
+        return 1
+    fi
+    echo "==> Guest fighters"
+    # Nothing else runs in this mode, so there is nothing to carry on with: a refusal or a failure is the
+    # result, and the exit status says so (the driver's own: 1 failed, 3 refused).
+    local rc=0
+    guests_run "$1" "$2" "$3" || rc=$?
+    [ "$rc" -eq 0 ] || echo "  Nothing was changed."
+    return "$rc"
+}
+
 if [ "${RINGOUT_SETUP_LIB:-0}" = 1 ]; then return 0; fi
 
-DECK=0
-ISO=""
-PGO=0
-ASSUME_YES=0
-STEAM=ask
-CHECK_TOOLCHAIN=0
-for arg in "$@"; do
-    case "$arg" in
-        --deck) DECK=1 ;;
-        --pgo)  PGO=1 ;;
-        -y|--yes) ASSUME_YES=1 ;;
-        --add-to-steam) STEAM=yes ;;
-        --no-steam)     STEAM=no ;;
-        --check-toolchain) CHECK_TOOLCHAIN=1 ;;
-        *)      [ -z "$ISO" ] && ISO="$arg" ;;
-    esac
-done
+parse_args "$@" || exit 1
 # --pgo adds a fourth stage. Counted from the flag rather than written into each
 # label, so the run that trains a profile does not announce "3/3" and then go on
 # to do a fourth thing -- which is what it did the first time this was run.
@@ -130,14 +203,25 @@ if [ "$OS" = Darwin ]; then
     export SDKROOT
 fi
 
+# --spawn or --heihachi with no GameCube disc: only them, into the install already here.
+if [ -n "$SPAWN_IMAGE$HEIHACHI_IMAGE" ] && [ -z "$ISO" ] && [ "$CHECK_TOOLCHAIN" != 1 ]; then
+    guests_only "$HERE" "$SPAWN_IMAGE" "$HEIHACHI_IMAGE"
+    exit $?
+fi
+
 if [ "$CHECK_TOOLCHAIN" != 1 ] && { [ -z "$ISO" ] || [ ! -f "$ISO" ]; }; then
-    echo "Usage: ./setup.sh [--deck] [--pgo] [-y] /path/to/your/disc.iso"
+    echo "Usage: ./setup.sh [--deck] [--pgo] [-y] [--spawn /path/to/xbox.iso] [--heihachi /path/to/ps2.iso] /path/to/your/disc.iso"
     echo
     echo "Supply a GameCube disc image you already have."
     echo "  --deck   build a module that also runs on a Steam Deck"
     echo "  --pgo    train a profile on YOUR clang and rebuild with it"
     echo "           (one-time; ~11 min extra on a desktop; worth 10-14%)"
     echo "  -y       skip the preflight confirmation and just build"
+    echo "  --spawn  also build Spawn from your Xbox Soul Calibur II disc image"
+    echo "  --heihachi  also build Heihachi from your PS2 Soul Calibur II disc image"
+    echo "           (US or PAL release; without a GameCube disc: add him to this install)"
+    echo "  --heihachi  also build Heihachi from your PS2 Soul Calibur II disc image"
+    echo "           (US release; if both are wanted, give both, every time)"
     exit 1
 fi
 
@@ -358,6 +442,21 @@ if [ -n "$PRE_WARN" ]; then
     printf '%b\n' "$PRE_WARN"
 fi
 
+# A guest image that cannot be used is found now, before the long build, not after it.
+if [ -n "$SPAWN_IMAGE$HEIHACHI_IMAGE" ]; then
+    echo "==> Guest fighters: checking the disc images"
+    # One image at a time: a refused Xbox disc must not take a good PS2 disc's Heihachi with it.
+    # Going on without one drops only that one, so the build after has no second attempt at it.
+    if [ -n "$SPAWN_IMAGE" ] && ! guests_run "$HERE" "$SPAWN_IMAGE" "" --check-image; then
+        guests_ask "$ASSUME_YES" || { echo "  Stopped. Nothing was changed."; exit 1; }
+        SPAWN_IMAGE=""
+    fi
+    if [ -n "$HEIHACHI_IMAGE" ] && ! guests_run "$HERE" "" "$HEIHACHI_IMAGE" --check-image; then
+        guests_ask "$ASSUME_YES" || { echo "  Stopped. Nothing was changed."; exit 1; }
+        HEIHACHI_IMAGE=""
+    fi
+fi
+
 # The prompt only exists where someone can answer it. The launcher runs this in
 # a terminal, but it is also run from scripts and piped, and a setup that blocks
 # forever on a question nobody sees is worse than one that just builds.
@@ -491,13 +590,49 @@ case "$DISC_ID" in GRSEAF|GRSJAF|GRSPAF|GRSEPS) LEADER_CASES=(--leader-cases);; 
 # no row. A row added before its playtest stays off unless
 # STATICRECOMP_FMV_UNPLAYTESTED=1.
 #
+# The two --gated-pc in the US/Plus and PAL lists are not the movie player's:
+# they are the game's render-list layer and item functions, which the run loop
+# hooks under a wide screen shape so effects projected from the 3D scene keep
+# their place (StaticRecompRenderLayerHook.h). Gated, not dispatch points: the
+# item function runs once per drawn object, and as dispatch points the two cost
+# the Deck 0.47% cycles at every shape. Gated, they stay native until the screen
+# shape in guest RAM is wider than 16:9.
+#
 # US AND PLUS. Plus is a hack of the US text -- its movie library is
 # byte-identical at all six addresses -- and it was playtested on this build,
 # which is the same bar the US disc had to clear.
 case "$DISC_ID" in
 GRSEAF|GRSEPS) LEADER_CASES+=(--direct-calls
     --dispatch-pc 0x8020C1E8 --dispatch-pc 0x80209138 --dispatch-pc 0x8020D3B8
-    --dispatch-pc 0x80207E90 --dispatch-pc 0x80207EE8 --dispatch-pc 0x80208244);;
+    --dispatch-pc 0x80207E90 --dispatch-pc 0x80207EE8 --dispatch-pc 0x80208244
+    --gated-pc 0x80020348 --gated-pc 0x8001F804);;
+esac
+# Spawn as character 29 (US only): his per-character code sites, gate group 1. Each is a compare on a
+# character ID whose cases stop at Link (27); while he is on, the run loop gives that one decision
+# the case of the fighter he shares it with (RecompGuestTables.h kUsSites, which must list the same
+# three). Gated, the code is the ungated build's whenever he is off.
+# The rest are the guests' hooks (kUsHooks, which must list the same PCs; 800B5628 is a site for Spawn
+# and a hook for Heihachi): the ranking records' code, the board row a guest takes, the per-character
+# stats rows guests have no slot in, and the end of the skeleton update, where Heihachi's gauntlets are
+# re-hung from his hands without the wrist bend, and the select screen's cell positions and cursor moves,
+# which put Heihachi's cell left of Mitsurugi and let it leave the screen.
+# ONLY WITH --spawn OR --heihachi, and all of them for either guest (one module and one profile for any
+# guest build). The gates are not free even while guests are off: the code-to-ID one is inlined into
+# ~80 callers, and every US player paid +0.82% Deck cycles for Spawn's nine (A/B 2026-11-11, no overlap).
+# Without a guest the module is main's, code and profile; the runtime keeps guests off with a module
+# that has no group-1 gates (staticrecomp_gate_groups). Heihachi's six are group 2, so a module built
+# for Spawn alone (before Heihachi) can be told apart: it keeps Heihachi off, and guest-only setup
+# refuses to add him to it.
+if [ -n "$SPAWN_IMAGE$HEIHACHI_IMAGE" ]; then
+    case "$DISC_ID" in
+    GRSEAF) LEADER_CASES+=(--gated-pc 0x800834DC@1 --gated-pc 0x80083594@1 --gated-pc 0x800B5628@1
+        --gated-pc 0x80091494@1 --gated-pc 0x8011D444@1 --gated-pc 0x8011DBE8@1
+        --gated-pc 0x8011D574@1 --gated-pc 0x80178BD4@1 --gated-pc 0x80178C50@1
+        --gated-pc 0x80032E44@2 --gated-pc 0x8015196C@2 --gated-pc 0x80151C44@2
+        --gated-pc 0x80153244@2 --gated-pc 0x801530A4@2 --gated-pc 0x801521B8@2);;
+    esac
+fi
+case "$DISC_ID" in
 # JP passes NO --dispatch-pc, and that is not an oversight. Its movie library is
 # not mapped, so the run loop hooks nothing on this disc (no row in the per-disc
 # table), and the US addresses are not entry points here AT ALL -- 0 entry-switch
@@ -513,7 +648,8 @@ GRSJAF) LEADER_CASES+=(--direct-calls);;
 # playtested build was built with. Six extra dispatch points out of 185066.
 GRSPAF) LEADER_CASES+=(--direct-calls
     --dispatch-pc 0x80213938 --dispatch-pc 0x80210888 --dispatch-pc 0x80214B08
-    --dispatch-pc 0x8020F5E0 --dispatch-pc 0x8020F638 --dispatch-pc 0x8020F994);;
+    --dispatch-pc 0x8020F5E0 --dispatch-pc 0x8020F638 --dispatch-pc 0x8020F994
+    --gated-pc 0x8002051C --gated-pc 0x8001F9D8);;
 esac
 # --self-calls (same discs): a call to a function in the SAME chunk also calls
 # natively, so neither the call nor its return goes through the dispatcher.
@@ -672,7 +808,13 @@ PGO_ARGS=()
 PROFILE=""
 CLANG_MAJOR="$("$CC" -dumpversion 2>/dev/null | cut -d. -f1)"
 if "$CC" --version 2>&1 | grep -qi clang; then
-    if [ -n "$CLANG_MAJOR" ] && [ -f "$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata" ]; then
+    # A guest build (--spawn/--heihachi) has their gated PCs, which change chunks' control flow: it takes the
+    # profiles trained with them, <ID>.guests[.clangNN].profdata.
+    if [ -n "$SPAWN_IMAGE$HEIHACHI_IMAGE" ] && [ -n "$CLANG_MAJOR" ] && [ -f "$HERE/module-src/profiles/$DISC_ID.guests.clang$CLANG_MAJOR.profdata" ]; then
+        PROFILE="$HERE/module-src/profiles/$DISC_ID.guests.clang$CLANG_MAJOR.profdata"
+    elif [ -n "$SPAWN_IMAGE$HEIHACHI_IMAGE" ] && [ -f "$HERE/module-src/profiles/$DISC_ID.guests.profdata" ]; then
+        PROFILE="$HERE/module-src/profiles/$DISC_ID.guests.profdata"
+    elif [ -n "$CLANG_MAJOR" ] && [ -f "$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata" ]; then
         PROFILE="$HERE/module-src/profiles/$DISC_ID.clang$CLANG_MAJOR.profdata"
     elif [ -f "$HERE/module-src/profiles/$DISC_ID.profdata" ]; then
         PROFILE="$HERE/module-src/profiles/$DISC_ID.profdata"
@@ -978,6 +1120,13 @@ if [ "$PGO" = 1 ]; then
     fi
     rm -rf "$HERE/work/build-gen" "$PROFDIR" "$HERE/work/pgo-user"
   fi
+fi
+
+# The guests, now that the game data they are built against is in place (stage 1 starts from an empty game/),
+# and before --deck copies game/ into the Deck package, so they go with it.
+if [ -n "$SPAWN_IMAGE$HEIHACHI_IMAGE" ]; then
+    echo "==> Guest fighters (a few minutes)"
+    guests_step "$HERE" "$SPAWN_IMAGE" "$HEIHACHI_IMAGE" "$ASSUME_YES" || { echo "  Stopped. The game itself is installed; run ./RingOut to play."; exit 1; }
 fi
 
 # The module you just built is also the one you copy to a Steam Deck -- the Deck

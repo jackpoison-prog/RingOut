@@ -104,6 +104,35 @@ u32 ReadGuestU32(void* memory, u32 address)
 {
   return static_cast<Memory::MemoryManager*>(memory)->Read_U32(address);
 }
+
+// The face-off screen between character select and the stage (two fighters,
+// their names, VS): non-zero while it is up. The game's own state word -- set
+// to 1 by fn_80082CDC as the wipe into it starts, cleared by fn_800830A0 as the
+// stage intro begins (watched over the arcade route, 2026-11-01). Its two
+// fighters are 3D, in one centred view, and under a wide shape that view
+// spread them to the edges, away from their 2D names
+// (RecompOrthoSqueeze::g_3d_follows_2d).
+struct FaceOff
+{
+  const char* game_id;
+  u32 state;
+};
+constexpr FaceOff kFaceOffs[] = {
+    {"GRSEAF", 0x804609E8},
+    {"GRSEPS", 0x804609E8},  // Plus: the same clearing function at the same address
+    {"GRSPAF", 0x80474B30},  // PAL: the same function, at 0x80083CC4
+};
+
+bool FaceOffShowing(const Memory::MemoryManager& memory)
+{
+  const std::string id = SConfig::GetInstance().GetGameID();
+  for (const FaceOff& f : kFaceOffs)
+  {
+    if (id == f.game_id)
+      return InRam(memory, f.state, 4) && memory.Read_U32(f.state) != 0;
+  }
+  return false;
+}
 }  // namespace
 
 bool IsNative()
@@ -214,17 +243,19 @@ void OnFrame(Core::System& system)
   Shape shown = Shape::Wide16x9;
   if (const RecompScreenShape::Table* table = FindShapeTable())
   {
+    bool now_face_off = false;
     const std::optional<Shape> now =
-        RecompScreenShape::CurrentShape(*table, ReadGuestU32, &memory);
+        RecompScreenShape::CurrentShape(*table, ReadGuestU32, &memory, &now_face_off);
     s_foreign_build.store(!now.has_value(), std::memory_order_relaxed);
     if (now)
     {
       shown = *now;
       const Shape want_shape = game_wide ? GetShape() : Shape::Wide16x9;
-      if (want_shape != *now && GuestWritesAllowed(system))
+      const bool want_face_off = FaceOffShowing(memory);
+      if ((want_shape != *now || want_face_off != now_face_off) && GuestWritesAllowed(system))
       {
-        for (const RecompScreenShape::Write& w :
-             RecompScreenShape::Writes(*table, ReadGuestU32, &memory, want_shape))
+        for (const RecompScreenShape::Write& w : RecompScreenShape::Writes(
+                 *table, ReadGuestU32, &memory, want_shape, want_face_off))
           memory.Write_U32(w.bits, w.address);
         shown = want_shape;
       }
@@ -248,6 +279,7 @@ void OnFrame(Core::System& system)
   if (!managed)
   {
     RecompOrthoSqueeze::g_factor.store(1.0f, std::memory_order_relaxed);
+    RecompOrthoSqueeze::g_3d_follows_2d.store(false, std::memory_order_relaxed);
     return;
   }
   const std::optional<RecompScreenShape::AspectPair> pair =
@@ -255,6 +287,8 @@ void OnFrame(Core::System& system)
   // The 2D follows the display: narrowed only while it shows our shape.
   RecompOrthoSqueeze::g_factor.store(pair ? RecompScreenShape::OrthoSqueeze(shown) : 1.0f,
                                      std::memory_order_relaxed);
+  RecompOrthoSqueeze::g_3d_follows_2d.store(pair && FaceOffShowing(memory),
+                                            std::memory_order_relaxed);
   const AspectMode desired =
       !game_wide ? AspectMode::Auto : pair ? AspectMode::Custom : AspectMode::ForceWide;
   if (pair && (custom_w != pair->width || custom_h != pair->height))

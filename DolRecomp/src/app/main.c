@@ -90,6 +90,8 @@ int main(int argc, char** argv) {
     emit_set_ca_elide(opts.ca_elide != 0);
     for (u32 i = 0; i < opts.dispatch_pc_count; ++i)
         emit_add_dispatch_pc(opts.dispatch_pcs[i]);
+    for (u32 i = 0; i < opts.gated_pc_count; ++i)
+        emit_add_gated_pc_group(opts.gated_pcs[i], opts.gated_groups[i]);
 
     const char* input_path  = opts.input_path;
     const char* title_id_arg = opts.title_id_arg;

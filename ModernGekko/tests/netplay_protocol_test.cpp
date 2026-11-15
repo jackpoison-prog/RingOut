@@ -211,10 +211,14 @@ int main() {
   if (std::string(moderngekko::frontend::HostPlatformName()) != "arm64")
     return 13;
 #endif
-  if (first_fingerprint.rfind(std::string("moderngekko-netplay-8|") +
+  if (first_fingerprint.rfind(std::string("moderngekko-netplay-9|") +
                                   moderngekko::frontend::HostPlatformName() + "|",
                               0) != 0)
     return 14;
+  // The guests are the last field. No guest data here, so they are off: a peer with them on cannot match.
+  if (first_fingerprint.size() < 9 ||
+      first_fingerprint.compare(first_fingerprint.size() - 9, 9, "|noguests") != 0)
+    return 15;
 
   // ---- identity handshake --------------------------------------------------
   //
@@ -264,13 +268,13 @@ int main() {
     // A Mac joining a PC: same disc, different platform field. Refused with a
     // reason that names the platform, not the generic "differently built".
     {
-      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-8|arm64|A");
+      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-9|arm64|A");
       TestUI mac_host_ui;
       auto mac_host = std::make_unique<NetPlay::NetPlayServer>(
           0, false, &mac_host_ui, NetPlay::NetTraversalConfig{});
       if (!mac_host->is_connected)
         return 26;
-      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-8|x86_64|A");
+      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-9|x86_64|A");
       TestUI pc_ui;
       auto pc = std::make_unique<NetPlay::NetPlayClient>(
           "127.0.0.1", mac_host->GetPort(), &pc_ui, "PcPlayer",
@@ -281,7 +285,7 @@ int main() {
         return 28;
       pc.reset();
       // Same platform, different build: still the build reason.
-      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-8|arm64|B");
+      NetPlay::SetGameIdentity("GRSEAF", "moderngekko-netplay-9|arm64|B");
       TestUI other_mac_ui;
       auto other_mac = std::make_unique<NetPlay::NetPlayClient>(
           "127.0.0.1", mac_host->GetPort(), &other_mac_ui, "OtherMac",

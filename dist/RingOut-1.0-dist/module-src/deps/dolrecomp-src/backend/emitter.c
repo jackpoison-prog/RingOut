@@ -592,10 +592,15 @@ void emit_set_entry_targets(const u32* targets, u32 count) {
 
 /* Is this instruction an entry beyond being a block leader? See the rule at
  * s_leader_cases. Read-only on s_entry_targets, so safe on the workers. */
+static int gated_pc_group(u32 pc);
+
 static bool is_extra_entry(const PPCInst* inst) {
     u32 lo = 0, hi = s_entry_target_count;
     if (inst->embedded_data)
         return false;
+    /* --gated-pc: the dispatcher re-enters here after running the hook. */
+    if (gated_pc_group(inst->address) >= 0)
+        return true;
     if (ppc_op_uses_fpu(inst->op))
         return true;
     while (lo < hi) {
@@ -614,6 +619,70 @@ static u32 s_dispatch_pc_count = 0;
 void emit_add_dispatch_pc(u32 pc) {
     if (pc != 0 && s_dispatch_pc_count < 32)
         s_dispatch_pcs[s_dispatch_pc_count++] = pc;
+}
+
+/* --gated-pc: a PC the host hooks only some of the time (the ultrawide
+ * render-layer hooks, needed only under a screen shape wider than 16:9). A
+ * --dispatch-pc pays a dispatcher round trip on every call, hook wanted or not
+ * -- +0.47% cycles on the Deck for two of them (2026-11-02). A gated PC is
+ * emitted like any other, so with the gate down the code and the guest timing
+ * are the ungated build's; one test at its label sends control back to the
+ * dispatcher while the module's dolrecomp_gate_armed is set. The dispatcher
+ * then runs its hook and re-enters with dolrecomp_gate_bypass naming the PC,
+ * which lets that one entry through. The check sits at the label, not the call
+ * sites, so every path in -- direct call, goto, entry switch, fall-through --
+ * meets it. The two variables live in the module template (module_export.c). */
+/* Each gated PC belongs to a group (0-7): its label tests only that group's bit of the gate, so the
+ * chassis can arm one set of hooks without sending another set to the dispatcher. Group 0 is the
+ * ultrawide render layers (armed with the value 1), group 1 Spawn's per-character sites. */
+static u32 s_gated_pcs[32];
+static u32 s_gated_groups[32];
+static u32 s_gated_pc_count = 0;
+
+void emit_add_gated_pc_group(u32 pc, u32 group) {
+    if (pc != 0 && group < EMIT_GATE_GROUPS && s_gated_pc_count < 32) {
+        s_gated_groups[s_gated_pc_count] = group;
+        s_gated_pcs[s_gated_pc_count++] = pc;
+    }
+}
+
+void emit_add_gated_pc(u32 pc) {
+    emit_add_gated_pc_group(pc, 0u);
+}
+
+bool emit_parse_gated_pc(const char* arg, u32* pc, u32* group) {
+    char* end = NULL;
+    unsigned long v = strtoul(arg, &end, 0);
+    unsigned long g = 0;
+    if (end == arg || v == 0 || v > 0xFFFFFFFFul) return false;
+    if (*end == '@') {
+        const char* gs = end + 1;
+        g = strtoul(gs, &end, 10);
+        if (end == gs || g >= EMIT_GATE_GROUPS) return false;
+    }
+    if (*end != '\0') return false;
+    *pc = (u32)v;
+    *group = (u32)g;
+    return true;
+}
+
+bool emit_has_gated_pcs(void) {
+    return s_gated_pc_count != 0;
+}
+
+u32 emit_gate_group_mask(void) {
+    u32 mask = 0;
+    for (u32 i = 0; i < s_gated_pc_count; ++i)
+        mask |= 1u << s_gated_groups[i];
+    return mask;
+}
+
+/* The gated PC's group, or -1 when the PC is not gated. */
+static int gated_pc_group(u32 pc) {
+    for (u32 i = 0; i < s_gated_pc_count; ++i)
+        if (s_gated_pcs[i] == pc)
+            return (int)s_gated_groups[i];
+    return -1;
 }
 
 static bool must_reach_dispatcher(u32 pc) {
@@ -3333,6 +3402,17 @@ void emit_function(FILE* out, const PPCInst* insts, u32 count, u32 own, u32 func
             s_fp_skip_label = insts[i].address;
         }
         fprintf(out, "label_%08X:\n", insts[i].address);
+        if (gated_pc_group(insts[i].address) >= 0) {
+            fprintf(out, "    if (DOLRECOMP_UNLIKELY(dolrecomp_gate_armed & 0x%Xu)) {\n",
+                    1u << gated_pc_group(insts[i].address));
+            fprintf(out, "        if (dolrecomp_gate_bypass == 0x%08Xu) {\n", insts[i].address);
+            fprintf(out, "            dolrecomp_gate_bypass = 0u;\n");
+            fprintf(out, "        } else {\n");
+            fprintf(out, "            ctx->pc = 0x%08Xu;\n", insts[i].address);
+            fprintf(out, "            DOLRECOMP_RETURN;\n");
+            fprintf(out, "        }\n");
+            fprintf(out, "    }\n");
+        }
         // ctx->pc only has to be live where it is actually read: block entry
         // (the dispatch switch + lockstep check use the leader address, which
         // the caller/branch already placed in ctx->pc) and downcount context.

@@ -118,6 +118,8 @@ FORBIDDEN_NAMES=(
   # of the identifier scan -- where it produces chance matches such as an
   # AWS-key-shaped run of characters inside game/files/root.olk.
   'game'
+  # Spawn, converted from the player's Xbox disc by setup.sh --spawn: game data too, wherever it lands.
+  'root-spawn.*' 'spawn.new' 'spawn.old' 'root-guests.*' 'guests.json' 'guests.new' 'guests.old'
 )
 
 fail=0

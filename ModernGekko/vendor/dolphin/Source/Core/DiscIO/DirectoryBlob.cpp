@@ -1069,6 +1069,13 @@ u64 DirectoryBlobPartition::SetDOL(FSTBuilderNode dol_node, u64 dol_address,
   return Common::AlignUp(dol_address + dol_node.m_size + 0x20, 0x20ull);
 }
 
+static HostFileResolver s_host_file_resolver = nullptr;
+
+void SetHostFileResolver(HostFileResolver resolver)
+{
+  s_host_file_resolver = resolver;
+}
+
 static std::vector<FSTBuilderNode> ConvertFSTEntriesToBuilderNodes(const File::FSTEntry& parent)
 {
   std::vector<FSTBuilderNode> nodes;
@@ -1082,8 +1089,17 @@ static std::vector<FSTBuilderNode> ConvertFSTEntriesToBuilderNodes(const File::F
     }
     else
     {
-      content =
-          std::vector<BuilderContentSource>{{0, entry.size, ContentFile{entry.physicalName, 0}}};
+      std::string path = entry.physicalName;
+      u64 size = entry.size;
+      if (s_host_file_resolver)
+      {
+        path = s_host_file_resolver(entry.physicalName);
+        if (path != entry.physicalName)
+          size = File::GetSize(path);
+      }
+      content = std::vector<BuilderContentSource>{{0, size, ContentFile{path, 0}}};
+      nodes.emplace_back(FSTBuilderNode{entry.virtualName, size, std::move(content)});
+      continue;
     }
 
     nodes.emplace_back(FSTBuilderNode{entry.virtualName, entry.size, std::move(content)});

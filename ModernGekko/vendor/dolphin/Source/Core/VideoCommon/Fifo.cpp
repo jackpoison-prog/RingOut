@@ -1,6 +1,7 @@
 // Copyright 2008 Dolphin Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "VideoCommon/RecompLayerMarkers.h"
 #include "VideoCommon/Fifo.h"
 
 #include <algorithm>
@@ -96,6 +97,7 @@ void FifoManager::Init()
   // Padded so that SIMD overreads in the vertex loader are safe
   m_video_buffer = static_cast<u8*>(Common::AllocateMemoryPages(FIFO_SIZE + 4));
   ResetVideoBuffer();
+  RecompLayerMarkers::Reset();
   if (m_system.IsDualCoreMode())
     m_gpu_mainloop.Prepare();
   m_sync_ticks.store(0);
@@ -225,11 +227,12 @@ void* FifoManager::PopFifoAuxBuffer(size_t size)
 // Description: RunGpuLoop() sends data through this function.
 void FifoManager::ReadDataFromFifo(u32 read_ptr)
 {
-  if (GPFifo::GATHER_PIPE_SIZE >
-      static_cast<size_t>(m_video_buffer + FIFO_SIZE - m_video_buffer_write_ptr))
+  // Room for the block plus any layer markers spliced into it (RecompLayerMarkers.h).
+  constexpr size_t room = GPFifo::GATHER_PIPE_SIZE + RecompLayerMarkers::kMaxExtraBytes;
+  if (room > static_cast<size_t>(m_video_buffer + FIFO_SIZE - m_video_buffer_write_ptr))
   {
     const size_t existing_len = m_video_buffer_write_ptr - m_video_buffer_read_ptr;
-    if (GPFifo::GATHER_PIPE_SIZE > static_cast<size_t>(FIFO_SIZE - existing_len))
+    if (room > static_cast<size_t>(FIFO_SIZE - existing_len))
     {
       PanicAlertFmt("FIFO out of bounds (existing {} + new {} > {})", existing_len,
                     GPFifo::GATHER_PIPE_SIZE, FIFO_SIZE);
@@ -242,14 +245,17 @@ void FifoManager::ReadDataFromFifo(u32 read_ptr)
   // Copy new video instructions to m_video_buffer for future use in rendering the new picture
   auto& memory = m_system.GetMemory();
   memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
-  m_video_buffer_write_ptr += GPFifo::GATHER_PIPE_SIZE;
+  m_video_buffer_write_ptr +=
+      GPFifo::GATHER_PIPE_SIZE +
+      RecompLayerMarkers::Splice(read_ptr, m_video_buffer_write_ptr, GPFifo::GATHER_PIPE_SIZE);
 }
 
 // The deterministic_gpu_thread version.
 void FifoManager::ReadDataFromFifoOnCPU(u32 read_ptr)
 {
   u8* write_ptr = m_video_buffer_write_ptr;
-  if (GPFifo::GATHER_PIPE_SIZE > static_cast<size_t>(m_video_buffer + FIFO_SIZE - write_ptr))
+  constexpr size_t room = GPFifo::GATHER_PIPE_SIZE + RecompLayerMarkers::kMaxExtraBytes;
+  if (room > static_cast<size_t>(m_video_buffer + FIFO_SIZE - write_ptr))
   {
     // We can't wrap around while the GPU is working on the data.
     // This should be very rare due to the reset in SyncGPU.
@@ -267,7 +273,7 @@ void FifoManager::ReadDataFromFifoOnCPU(u32 read_ptr)
     }
     write_ptr = m_video_buffer_write_ptr;
     const size_t existing_len = write_ptr - m_video_buffer_pp_read_ptr;
-    if (GPFifo::GATHER_PIPE_SIZE > static_cast<size_t>(FIFO_SIZE - existing_len))
+    if (room > static_cast<size_t>(FIFO_SIZE - existing_len))
     {
       PanicAlertFmt("FIFO out of bounds (existing {} + new {} > {})", existing_len,
                     GPFifo::GATHER_PIPE_SIZE, FIFO_SIZE);
@@ -276,10 +282,12 @@ void FifoManager::ReadDataFromFifoOnCPU(u32 read_ptr)
   }
   auto& memory = m_system.GetMemory();
   memory.CopyFromEmu(m_video_buffer_write_ptr, read_ptr, GPFifo::GATHER_PIPE_SIZE);
+  const size_t len = GPFifo::GATHER_PIPE_SIZE +
+                     RecompLayerMarkers::Splice(read_ptr, write_ptr, GPFifo::GATHER_PIPE_SIZE);
   m_video_buffer_pp_read_ptr = OpcodeDecoder::RunFifo<true>(
-      DataReader(m_video_buffer_pp_read_ptr, write_ptr + GPFifo::GATHER_PIPE_SIZE), nullptr);
+      DataReader(m_video_buffer_pp_read_ptr, write_ptr + len), nullptr);
   // This would have to be locked if the GPU thread didn't spin.
-  m_video_buffer_write_ptr = write_ptr + GPFifo::GATHER_PIPE_SIZE;
+  m_video_buffer_write_ptr = write_ptr + len;
 }
 
 void FifoManager::ResetVideoBuffer()

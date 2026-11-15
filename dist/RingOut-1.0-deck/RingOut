@@ -314,11 +314,48 @@ if [ ! -d "$HERE/game" ]; then
     exit 1
 fi
 
+# >>> layer-retry (kept identical in both launchers; tests/test_layer_retry.sh checks)
+# Mesa's device-select Vulkan layer can make swap-chain creation fail outright
+# (RingOut#16: Wayland + NVIDIA). Turning it off fixes those systems, but it is
+# what picks the right GPU on hybrid laptops, so it is never turned off up front:
+# only a run that failed on exactly that is retried, once, without it.
+DEVICE_SELECT_LAYER=VK_LAYER_MESA_device_select
+# One run of the game. Its output also goes to a temp copy, read once the run
+# is over, so the check cannot race the log's tee. The game is a child here,
+# not exec'd, so a stop aimed at this launcher (a closed terminal, a frontend
+# killing the pid it started) is passed on to it rather than orphaning it.
+run_game_once() { # out-file command...
+    local out="$1" pipe; shift
+    { "$@" & echo $! > "$out.pid"; wait $!; echo $? > "$out.rc"; } 2>&1 | tee "$out" &
+    pipe=$!
+    trap 'kill -TERM "$(cat "$out.pid" 2>/dev/null)" 2>/dev/null' TERM INT HUP
+    # wait returns early when a trap runs; keep waiting until the run is over.
+    until wait "$pipe"; do kill -0 "$pipe" 2>/dev/null || break; done
+    trap - TERM INT HUP
+    return "$(cat "$out.rc" 2>/dev/null || echo 1)"
+}
+run_with_layer_retry() {
+    local out rc
+    out="$(mktemp "${TMPDIR:-/tmp}/ringout-run.XXXXXX")" || { "$@"; return; }
+    run_game_once "$out" "$@"
+    rc=$?
+    if [ "$rc" -ne 0 ] && grep -qF 'Failed to create Vulkan swap chain' "$out" &&
+       [[ ",${VK_LOADER_LAYERS_DISABLE:-}," != *",$DEVICE_SELECT_LAYER,"* ]]; then
+        echo "[launcher] Vulkan could not create a swap chain; retrying once without $DEVICE_SELECT_LAYER"
+        export VK_LOADER_LAYERS_DISABLE="${VK_LOADER_LAYERS_DISABLE:+$VK_LOADER_LAYERS_DISABLE,}$DEVICE_SELECT_LAYER"
+        run_game_once "$out" "$@"
+        rc=$?
+    fi
+    rm -f "$out" "$out.pid" "$out.rc"
+    return "$rc"
+}
+# <<< layer-retry
+
 # The Deck's screen is 1280x800 and gamescope owns the display in Game Mode, so
 # fullscreen is left to Steam rather than forced here.
 # Not exec, so the exit status can be recorded. A runtime that dies during video
 # init and one that never started at all look identical from Steam's side.
-"$HERE/bin/moderngekko-run" \
+run_with_layer_retry "$HERE/bin/moderngekko-run" \
     --user-dir "$USER_DIR" \
     --game "$HERE/game" \
     --module "$MODULE" \

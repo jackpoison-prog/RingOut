@@ -208,6 +208,9 @@ if ('GRSEAF', 'GRSEPS' -contains $DiscId) {
     $LeaderCases = @('--leader-cases', '--direct-calls',
         '--dispatch-pc', '0x8020C1E8', '--dispatch-pc', '0x80209138', '--dispatch-pc', '0x8020D3B8',
         '--dispatch-pc', '0x80207E90', '--dispatch-pc', '0x80207EE8', '--dispatch-pc', '0x80208244',
+        # The game's render-list layer and item functions, hooked under a wide
+        # screen shape (StaticRecompRenderLayerHook.h); gated, as setup.sh.
+        '--gated-pc', '0x80020348', '--gated-pc', '0x8001F804',
         # --self-calls, as setup.sh: a call within the same chunk is native too
         # (-5.8% CPU cycles on top, with its own retrained profile).
         '--self-calls')
@@ -221,6 +224,7 @@ elseif ($DiscId -eq 'GRSPAF') {
     $LeaderCases = @('--leader-cases', '--direct-calls',
         '--dispatch-pc', '0x80213938', '--dispatch-pc', '0x80210888', '--dispatch-pc', '0x80214B08',
         '--dispatch-pc', '0x8020F5E0', '--dispatch-pc', '0x8020F638', '--dispatch-pc', '0x8020F994',
+        '--gated-pc', '0x8002051C', '--gated-pc', '0x8001F9D8',
         '--self-calls')
 }
 elseif ($DiscId -eq 'GRSJAF') {

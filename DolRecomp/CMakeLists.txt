@@ -217,6 +217,11 @@ add_executable(test_emitter_flags tests/test_emitter_flags.c)
 target_link_libraries(test_emitter_flags PRIVATE dr_backend)
 add_test(NAME emitter_flags COMMAND test_emitter_flags)
 
+# --gated-pc groups: each gated label tests only its own group's bit of the gate.
+add_executable(test_gated_pc tests/test_gated_pc.c)
+target_link_libraries(test_gated_pc PRIVATE dr_backend)
+add_test(NAME gated_pc COMMAND test_gated_pc)
+
 # Lazy FPRF must flush on entry to every op that writes FPSCR[12:16] itself, or
 # a later materialise wipes those bits. Cost three attempts to get right.
 add_executable(test_lazy_fprf tests/test_lazy_fprf.c)

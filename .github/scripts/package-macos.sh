@@ -119,6 +119,11 @@ ls "$STAGE/module-src/profiles" | sed 's/^/    /'
 
 echo "==> scaffolding"
 install -m 755 "$SRC/setup.sh" "$STAGE/setup.sh"
+# setup.sh --spawn: the converter that builds Spawn from the player's own Xbox disc (no tests, no data).
+mkdir -p "$STAGE/tools/spawn" "$STAGE/tools/guests" "$STAGE/tools/heihachi"
+install -m 644 "$REPO"/tools/spawn/*.py "$STAGE/tools/spawn/"
+install -m 644 "$REPO"/tools/heihachi/*.py "$STAGE/tools/heihachi/"
+install -m 644 "$REPO"/tools/guests/*.py "$REPO/tools/guests/dspenc.c" "$STAGE/tools/guests/"
 install -m 755 "$SRC/macos/Setup.command" "$STAGE/Setup.command"
 sed "1s/^Ring Out - Ver [0-9.]*/Ring Out - Ver $VERSION/" "$SRC/macos/README-macos.txt" > "$STAGE/README.txt"
 # The Deck's model, not the Linux package's: these binaries are prebuilt and
@@ -142,7 +147,7 @@ for forbidden in game work art userdata/GC userdata/Config; do
     [ -e "$STAGE/$forbidden" ] && { echo "  FAIL: $forbidden is in the stage" >&2; exit 1; }
 done
 if find "$STAGE" \( -name '*_recomp.dylib' -o -name '*_recomp.so' -o -name '*.gci' \
-                    -o -name '*.iso' -o -name '*.rvz' \) | grep -q .; then
+                    -o -name '*.iso' -o -name '*.rvz' -o -name 'root-spawn.*' -o -name 'root-guests.*' \) | grep -q .; then
     echo "  FAIL: disc-derived files in the stage" >&2; exit 1
 fi
 offer_url="$(grep -oE 'https://github\.com/[A-Za-z0-9._/-]+' "$STAGE/CREDITS.txt" | grep -iE '/RingOut' | head -1)"

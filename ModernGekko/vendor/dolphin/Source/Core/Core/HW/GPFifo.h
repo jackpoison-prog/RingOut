@@ -38,6 +38,9 @@ public:
 
   bool IsBNE() const;
 
+  // Bytes written to the gather pipe and not yet burst into the FIFO.
+  size_t PendingBytes() { return GetGatherPipeCount(); }
+
   // Write
   void Write8(u8 value);
   void Write16(u16 value);

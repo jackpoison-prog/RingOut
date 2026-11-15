@@ -8,6 +8,12 @@
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/CoreTiming.h"
 #include "Core/RecompWidescreen.h"
+#include "Core/RecompGuest.h"
+#include "Core/RecompGuestTables.h"
+#include "Core/HW/GPFifo.h"
+#include "Core/HW/ProcessorInterface.h"
+#include "VideoCommon/RecompLayerMarkers.h"
+#include "VideoCommon/RecompOrthoSqueeze.h"
 #include "Core/HW/CPU.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
@@ -20,6 +26,7 @@
 #include "Core/HW/SystemTimers.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -488,6 +495,69 @@ u32 StaticRecompCore::GuestRead32(u32 addr) const
 }
 
 // Write a big-endian u32 to guest MEM1 (0x80000000 based); no-op if oob.
+// The run loop is at layer_pc or item_pc (StaticRecompRenderLayerHook.h).
+// Markers are sent only when the answer changes, and the GPU starts every frame
+// at "not an effect", which the HUD layer -- drawn last -- leaves it at too.
+void StaticRecompCore::OnRenderLayerHook()
+{
+  const StaticRecompRenderLayerHooks& hooks = m_layer_hooks;
+  bool effect;
+  if (m_guest.pc == hooks.layer_pc)
+  {
+    m_render_layer = m_guest.gpr[4];
+    if (m_render_layer != 6)
+      return;
+    effect = false;
+  }
+  else
+  {
+    const u32 item = m_guest.gpr[3];
+    effect = StaticRecompIsSceneEffect(m_guest.lr == hooks.per_view_return, m_render_layer,
+                                       static_cast<u8>(GuestRead32(item + 0x2c)),
+                                       static_cast<u8>(GuestRead32(item + 0x10)));
+  }
+  if (effect == m_scene_effect_marked)
+    return;
+  m_scene_effect_marked = effect;
+  PushLayerMarker(effect ? 1u : 0u);
+}
+
+// Where the next gather-pipe byte will land in the guest FIFO: the block the
+// write pointer names, advanced past any whole bursts still in the pipe.
+void StaticRecompCore::PushLayerMarker(u32 value)
+{
+  const auto& pi = m_system.GetProcessorInterface();
+  const size_t in_pipe = m_system.GetGPFifo().PendingBytes();
+  size_t pending = in_pipe;
+  u32 block = pi.m_fifo_cpu_write_pointer;
+  for (; pending >= GPFifo::GATHER_PIPE_SIZE; pending -= GPFifo::GATHER_PIPE_SIZE)
+    block = block == pi.m_fifo_cpu_end ? pi.m_fifo_cpu_base : block + GPFifo::GATHER_PIPE_SIZE;
+  // The bytes still in the pipe are the start of that block, and the whole
+  // bursts in front of them the blocks before it.
+  const u8* pipe = m_system.GetPPCState().gather_pipe_ptr - in_pipe;
+  const u8* prefix = pipe + (in_pipe - pending);
+  // The block before it: the last whole burst still in the pipe, or else the
+  // one the pipe last wrote to the FIFO.
+  const u32 prev = block == pi.m_fifo_cpu_base ? pi.m_fifo_cpu_end : block - GPFifo::GATHER_PIPE_SIZE;
+  std::array<u8, GPFifo::GATHER_PIPE_SIZE> before;
+  if (in_pipe - pending >= GPFifo::GATHER_PIPE_SIZE)
+  {
+    std::memcpy(before.data(), prefix - GPFifo::GATHER_PIPE_SIZE, before.size());
+  }
+  else
+  {
+    for (size_t i = 0; i < before.size(); i += 4)
+    {
+      const u32 word = GuestRead32(0x80000000u | (prev + static_cast<u32>(i)));
+      before[i] = static_cast<u8>(word >> 24);
+      before[i + 1] = static_cast<u8>(word >> 16);
+      before[i + 2] = static_cast<u8>(word >> 8);
+      before[i + 3] = static_cast<u8>(word);
+    }
+  }
+  RecompLayerMarkers::Push(block, static_cast<u32>(pending), value, prefix, prev, before.data());
+}
+
 void StaticRecompCore::GuestWrite32(u32 addr, u32 value)
 {
   const u32 off = addr - 0x80000000u;
@@ -725,6 +795,7 @@ void StaticRecompCore::Run()
   // below read registers, not memory. LoadModule (Init only) is their sole
   // writer, so they cannot change while Run() is on the stack.
   const StaticRecompFmvHookPcs fmv = m_fmv_pcs;
+  const StaticRecompRenderLayerHooks layer = m_layer_hooks;
 
   u32 game_id_check = 0;
   while (*state_ptr == CPU::State::Running)
@@ -756,6 +827,27 @@ void StaticRecompCore::Run()
       {
         SyncIn();
         ++m_bursts;
+        if (m_gate_armed != nullptr)
+        {
+          // Once a burst: shapes change at most once a frame, Spawn once a boot.
+          u32 arm = 0u;
+          if (m_gate_factor_addr != 0)
+          {
+            // Group 0: wider than 16:9 in guest RAM arms the layer hooks' gate
+            // (see the members).
+            const u32 bits = GuestRead32(m_gate_factor_addr);
+            float factor;
+            std::memcpy(&factor, &bits, sizeof factor);
+            m_gate_on = factor > m_gate_factor_16x9 * 1.001f;
+            arm |= m_gate_on ? 1u : 0u;
+          }
+          // Groups 1 and 2: the guests' sites and hooks (RecompGuestTables.h kUsSites,
+          // kUsHooks; 2 is Heihachi's six), only while guests are on and their rows are in RAM.
+          // RINGOUT_SPAWN_WATCH=1 arms them for every fighter, to log arrivals.
+          m_spawn_gate_on = m_spawn_watch || RecompGuest::SitesArmed();
+          arm |= m_spawn_gate_on ? 6u : 0u;
+          *m_gate_armed = arm;
+        }
         do
         {
           // IsEnabled() is inline and ShouldCheck() is not, so calling the
@@ -776,6 +868,13 @@ void StaticRecompCore::Run()
           // cost a static-init guard check per dispatch. ---
           if (fmv_hist_on)
             FmvHistSample(m_guest.pc);
+
+          // Scene effects under a wide screen shape: tell the GPU when the game
+          // starts and stops drawing one (StaticRecompRenderLayerHook.h). Only
+          // the FIFO position is recorded; guest memory is not touched.
+          if ((m_guest.pc == layer.layer_pc || m_guest.pc == layer.item_pc) &&
+              RecompOrthoSqueeze::g_factor.load(std::memory_order_relaxed) != 1.0f)
+            OnRenderLayerHook();
 
           // Common path (no movie): just the start-detect compare. The frame /
           // decoder hooks engage only while a movie is active, so normal
@@ -884,7 +983,78 @@ void StaticRecompCore::Run()
           const u32 dispatch_from = dispatchlog_on ? m_guest.pc : 0;
 
           const u32 dbg_pc_before = m_guest.pc;
+          // Armed, a gated layer hook returned here to have its hook run (above);
+          // the bypass lets this one entry through its gate.
+          bool gate_entry =
+              m_gate_on && (m_guest.pc == layer.layer_pc || m_guest.pc == layer.item_pc);
+          if (m_spawn_gate_on)
+          {
+            // A guest's site: give this decision the case of the fighter he
+            // shares it with (the guest instruction there is a compare).
+            if (RecompGuestTables::IsSitePc(m_guest.pc))
+            {
+              if (m_spawn_watch && m_spawn_watch_lines < 64)
+              {
+                ++m_spawn_watch_lines;
+                std::fprintf(stderr, "[spawn-watch] site %08X id=%u\n", m_guest.pc,
+                             m_guest.gpr[(GuestRead32(m_guest.pc) >> 16) & 31]);
+              }
+              const u32 insn = GuestRead32(m_guest.pc);
+              const RecompGuestTables::SpawnSite* const site =
+                  RecompGuestTables::FindSite(m_guest.pc, m_guest.gpr[(insn >> 16) & 31]);
+              if (site && RecompGuestTables::ApplySite(*site, RecompGuest::InstalledGuests(), insn, m_guest.gpr))
+              {
+                const u32 bit = 1u << (site - RecompGuestTables::kUsSites.data());
+                if (!(m_spawn_sites_seen & bit))
+                {
+                  m_spawn_sites_seen |= bit;
+                  if (site->as_id == site->guest_id)
+                    std::fprintf(stderr, "[guests] site %08X: %u keeps his own case (%s)\n", site->pc,
+                                 site->guest_id, site->what);
+                  else
+                    std::fprintf(stderr, "[guests] site %08X: %u takes %u's case (%s)\n", site->pc,
+                                 site->guest_id, site->as_id, site->what);
+                }
+              }
+              gate_entry = true;
+            }
+            // Guest character-code hooks (RecompGuestTables.h kUsHooks): the ranking code, and the
+            // per-character stats rows guests have none of. Those standing in for a whole guest function
+            // send the guest back to its caller.
+            if (const RecompGuestTables::SpawnHook* hook = RecompGuestTables::FindHook(m_guest.pc))
+            {
+              u8* const ram = m_guest.ram;
+              const u32 size = m_guest.ram_size;
+              const RecompGuestTables::ReadFn read = [ram, size](std::uint32_t a) -> std::uint8_t {
+                const u32 off = a - 0x80000000u;
+                return ram != nullptr && off < size ? ram[off] : 0;
+              };
+              const RecompGuestTables::WriteFn write = [ram, size](std::uint32_t a, std::uint8_t v) {
+                const u32 off = a - 0x80000000u;
+                if (ram != nullptr && off < size)
+                  ram[off] = v;
+              };
+              const u32 at = m_guest.pc;
+              if (RecompGuestTables::ApplyHook(*hook, RecompGuest::InstalledGuests(), m_guest.gpr, m_guest.pc,
+                                               m_guest.lr, read, write))
+              {
+                const u32 bit = 1u << (hook - RecompGuestTables::kUsHooks.data());
+                if (!(m_spawn_hooks_seen & bit))
+                {
+                  m_spawn_hooks_seen |= bit;
+                  std::fprintf(stderr, "[guests] hook %08X: %s\n", hook->pc, hook->what);
+                }
+              }
+              if (m_guest.pc != at)
+                continue;
+              gate_entry = true;
+            }
+          }
+          if (gate_entry)
+            *m_gate_bypass = m_guest.pc;
           m_module->dispatch(&m_guest, m_guest.pc);
+          if (gate_entry)
+            *m_gate_bypass = 0u;
           ++m_native_dispatches;
           {
             // STATICRECOMP_SPINLOG=1: name the guest address a no-progress spin

@@ -20,6 +20,8 @@
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
 #include "VideoCommon/BPMemory.h"
+#include "VideoCommon/RecompLayerMarkers.h"
+#include "VideoCommon/VertexShaderManager.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/DataReader.h"
@@ -102,6 +104,15 @@ public:
   }
   OPCODE_CALLBACK(void OnBP(u8 command, u32 value))
   {
+    // RingOut's scene-effect marker, spliced into the video buffer by the FIFO
+    // reader (RecompLayerMarkers.h). Not the game's: no GPU cycles (they
+    // feed guest timing), no bpmem write, and the BP mask is left alone.
+    if (command == RecompLayerMarkers::kLayerBpReg)
+    {
+      if constexpr (!is_preprocess)
+        Core::System::GetInstance().GetVertexShaderManager().SetInSceneEffect((value & 1) != 0);
+      return;
+    }
     m_cycles += 12;
 
     if constexpr (is_preprocess)

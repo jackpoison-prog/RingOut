@@ -83,4 +83,14 @@ const ModernGekkoModuleDesc* ModuleLibrary::GetDescriptor() const
 {
   return m_impl->descriptor;
 }
+
+const void* ModuleLibrary::GetSymbol(const char* name) const
+{
+#if defined(MODERNGEKKO_ENABLE_DYNAMIC_MODULES)
+  if (m_impl->descriptor && m_impl->library.IsOpen())
+    return m_impl->library.GetSymbolAddress(name);
+#endif
+  (void)name;
+  return nullptr;
+}
 }

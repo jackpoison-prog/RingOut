@@ -247,7 +247,7 @@ echo "==> checks"
 for forbidden in game userdata bin/gGRSEAF_recomp.so art; do
   [ -e "$STAGE/$forbidden" ] && { echo "  FAIL: $forbidden is in the stage" >&2; exit 1; }
 done
-if find "$STAGE" -name '*_recomp.so' -o -name '*.gci' -o -name '*.iso' | grep -q .; then
+if find "$STAGE" -name '*_recomp.so' -o -name '*.gci' -o -name '*.iso' -o -name 'root-spawn.*' -o -name 'root-guests.*' | grep -q .; then
   echo "  FAIL: disc-derived files in the stage" >&2; exit 1
 fi
 

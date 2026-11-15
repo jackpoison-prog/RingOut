@@ -20,6 +20,7 @@
 #include "Core/MemTools.h"
 #include "Core/PowerPC/StaticRecomp/StaticRecompLockstep.h"
 #include "Core/RecompDeterminism.h"
+#include "Core/RecompScreenShape.h"
 #include "Core/System.h"
 
 #ifdef _M_X86_64
@@ -342,6 +343,11 @@ void StaticRecompCore::Shutdown()
   m_block_cache.Shutdown();
   m_module = nullptr;
   m_fmv_pcs = {};
+  m_layer_hooks = {};
+  m_gate_armed = nullptr;
+  m_gate_bypass = nullptr;
+  m_gate_factor_addr = 0;
+  m_gate_on = false;
   if (m_library.IsOpen())
     m_library.Close();
 
@@ -431,6 +437,32 @@ void StaticRecompCore::LoadModule()
                    m_fmv_pcs.start_afs != kStaticRecompNoFmvHook ? fmt::format("mwPlyStartAfs at {:#010x}",
                                                      m_fmv_pcs.start_afs) :
                                          std::string("none (the game decodes its own movies)"));
+    m_layer_hooks = StaticRecompFindRenderLayerHooks(desc->game_id);
+    // The gate (DolRecomp --gated-pc). Every current module exports it; only
+    // one generated with the layer hooks gated tests it.
+    m_gate_armed = static_cast<volatile u32*>(m_library.GetSymbolAddress("dolrecomp_gate_armed"));
+    m_gate_bypass = static_cast<volatile u32*>(m_library.GetSymbolAddress("dolrecomp_gate_bypass"));
+    m_gate_factor_addr = 0;
+    m_gate_on = false;
+    m_spawn_gate_on = false;
+    m_spawn_watch = std::getenv("RINGOUT_SPAWN_WATCH") != nullptr;
+    m_spawn_watch_lines = 0;
+    if (const RecompScreenShape::Table* t = RecompScreenShape::FindTable(desc->game_id);
+        t && m_layer_hooks.item_pc != kStaticRecompNoLayerHook && m_gate_armed && m_gate_bypass)
+    {
+      for (const RecompScreenShape::Constant& c : t->constants)
+      {
+        if (c.role == RecompScreenShape::Role::Factor)
+        {
+          m_gate_factor_addr = c.address;
+          std::memcpy(&m_gate_factor_16x9, &c.original_bits, sizeof(float));
+        }
+      }
+    }
+    if (m_gate_armed)
+      *m_gate_armed = 0u;
+    if (m_gate_bypass)
+      *m_gate_bypass = 0u;
   }
   {
     // Optional export; a module built before it existed has dispatcher timing.

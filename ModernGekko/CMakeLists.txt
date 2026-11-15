@@ -183,6 +183,15 @@ else()
     message(STATUS "DolRecomp: no sibling ../DolRecomp; using the vendored copy")
 endif()
 if(BUILD_TESTING)
+    # Spawn as character 29: manifest trust and the root.olk switch (RecompGuestCore.h,
+    # no Dolphin dependencies beyond the header-only picojson).
+    add_executable(moderngekko_guest_test tests/guest_test.cpp)
+    target_include_directories(moderngekko_guest_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core/Core"
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Externals/picojson")
+    target_compile_features(moderngekko_guest_test PRIVATE cxx_std_17)
+    add_test(NAME moderngekko.guest COMMAND moderngekko_guest_test)
+
     add_subdirectory("${_moderngekko_dolrecomp}" dolrecomp-build)
 else()
     add_subdirectory("${_moderngekko_dolrecomp}" dolrecomp-build EXCLUDE_FROM_ALL)

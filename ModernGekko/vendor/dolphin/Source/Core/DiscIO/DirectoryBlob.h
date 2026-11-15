@@ -26,6 +26,12 @@ struct FSTEntry;
 
 namespace DiscIO
 {
+// Maps a host file about to back a disc file to the host file that should back it instead (RingOut:
+// Spawn's archive in place of root.olk). Consulted when a folder is turned into a disc; nullptr --
+// the default -- keeps every file as it is.
+using HostFileResolver = std::string (*)(const std::string& host_path);
+void SetHostFileResolver(HostFileResolver resolver);
+
 enum class PartitionType : u32;
 
 class DirectoryBlobReader;

@@ -98,3 +98,19 @@ RECOMP_MODULE_EXPORT const u32 staticrecomp_timing_id = DOLRECOMP_TIMING_ID;
 #define DOLRECOMP_DYN_LOOP_BUDGET 0u
 #endif
 RECOMP_MODULE_EXPORT const u32 staticrecomp_dyn_loop_budget = DOLRECOMP_DYN_LOOP_BUDGET;
+
+/* The --gated-pc gate (DolRecomp emitter.c). The chassis sets armed while it
+   wants the gated PCs to reach the dispatcher, and names a PC in bypass to let
+   its own re-entry through. Defined in every module, used only by one
+   generated with --gated-pc: the chassis finding these does not mean any PC is
+   gated, and setting them is then harmless. */
+RECOMP_MODULE_EXPORT volatile u32 dolrecomp_gate_armed = 0u;
+RECOMP_MODULE_EXPORT volatile u32 dolrecomp_gate_bypass = 0u;
+
+/* Which gate groups this module was generated with (bit g = group g has labels). The chassis
+   arms a group only when its bit is here: Spawn's group 1 exists only in a module built with
+   setup.sh --spawn. A module from before this export has none, and arms no group-1 work. */
+#ifndef DOLRECOMP_GATE_GROUPS
+#define DOLRECOMP_GATE_GROUPS 0u
+#endif
+RECOMP_MODULE_EXPORT const u32 staticrecomp_gate_groups = DOLRECOMP_GATE_GROUPS;

@@ -10,7 +10,13 @@
 # Every assertion here has been mutation-tested: granting a disc a flag it has
 # not earned, or giving PAL the US hook addresses, makes it fail by name.
 $ErrorActionPreference = 'Stop'
+# Any error the extracted blocks throw fails the check by name; without this a
+# terminating error could end the run with nothing but a red line to show for it.
+trap { Write-Host "ERROR: $_"; exit 1 }
 $file = Join-Path $PSScriptRoot 'setup.ps1'
+# The shipped blocks read $Here (setup.ps1's own folder) for the per-disc
+# profiles; setup.ps1 sits alongside this script, so its folder is this one.
+$Here = $PSScriptRoot
 if (-not (Test-Path -LiteralPath $file)) { Write-Host "MISSING $file"; exit 2 }
 
 # 1. Full-file parse
@@ -46,6 +52,7 @@ foreach ($DiscId in @('GRSEAF', 'GRSJAF', 'GRSPAF', 'GRSEPS', 'GQSE5D')) {
 
 # 3. The invariants that matter
 Write-Host ""
+$failed = 0
 foreach ($DiscId in @('GRSEAF', 'GRSJAF', 'GRSPAF', 'GRSEPS', 'GQSE5D', 'ZZZZZZ')) {
     $LeaderCases = @(); $PsqFast = @()
     Invoke-Expression $lcBlock
@@ -81,6 +88,8 @@ foreach ($DiscId in @('GRSEAF', 'GRSJAF', 'GRSPAF', 'GRSEPS', 'GQSE5D', 'ZZZZZZ'
     if (('GQSE5D', 'ZZZZZZ' -contains $DiscId) -and ($hasLC -or $hasMem -or $hasDirect -or $hasSelf)) {
         $bad += "unknown disc $DiscId got a lever"
     }
-    if ($bad.Count) { Write-Host ("FAIL {0}: {1}" -f $DiscId, ($bad -join '; ')) }
+    if ($bad.Count) { Write-Host ("FAIL {0}: {1}" -f $DiscId, ($bad -join '; ')); $failed++ }
     else { Write-Host ("ok   {0}" -f $DiscId) }
 }
+if ($failed) { Write-Host "$failed disc(s) failed"; exit 1 }
+exit 0

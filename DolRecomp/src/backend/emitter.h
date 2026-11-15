@@ -42,6 +42,16 @@ int emit_llvm_backend_enabled(void);
 /* Guest PC that must always be reached through the dispatcher (a run-loop hook
    target). Repeatable; see emitter.c. */
 void emit_add_dispatch_pc(u32 pc);
+#define EMIT_GATE_GROUPS 8u
+void emit_add_gated_pc(u32 pc);                       /* group 0 */
+void emit_add_gated_pc_group(u32 pc, u32 group);      /* group < EMIT_GATE_GROUPS */
+/* "<addr>" or "<addr>@<group>"; false for a zero/garbled address or group >= EMIT_GATE_GROUPS. */
+bool emit_parse_gated_pc(const char* arg, u32* pc, u32* group);
+bool emit_has_gated_pcs(void);
+/* Bit g set when any PC was gated in group g: the module exports it, so the chassis can tell
+   whether a group's labels exist before arming it (a group armed against a module without its
+   labels sends nothing to the dispatcher, and that group's hooks never run). */
+u32 emit_gate_group_mask(void);
 
 /* Turn local `bl` into a native goto (--chain-calls). Unproven: see emitter.c. */
 void emit_set_chain_calls(bool enable);

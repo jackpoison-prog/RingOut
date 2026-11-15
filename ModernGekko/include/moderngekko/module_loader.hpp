@@ -41,6 +41,9 @@ public:
 
   bool IsOpen() const;
   const ModernGekkoModuleDesc* GetDescriptor() const;
+  // An exported symbol of an opened dynamic module, or nullptr (not found, not open, or a
+  // descriptor attached without a library).
+  const void* GetSymbol(const char* name) const;
 
 private:
   struct Impl;

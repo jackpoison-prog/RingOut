@@ -378,6 +378,11 @@ void emit_dispatch_helpers(FILE* out, const FunctionList* funcs, u32 entry_point
         fprintf(out, "#define DOLRECOMP_TIMING_ID 3u\n");
     else if (emit_direct_calls_enabled())
         fprintf(out, "#define DOLRECOMP_TIMING_ID 2u\n");
+    /* --gated-pc: the gate the chunks test at each gated label (emitter.c). */
+    if (emit_has_gated_pcs()) {
+        fprintf(out, "\nextern volatile u32 dolrecomp_gate_armed;\nextern volatile u32 dolrecomp_gate_bypass;\n");
+        fprintf(out, "#define DOLRECOMP_GATE_GROUPS 0x%Xu\n", emit_gate_group_mask());
+    }
     fprintf(out, "\ntypedef void (%s*DolRecompFunction)(CPUState* ctx);\n", emit_chunk_cc());
     fprintf(out, "\n#if defined(DOLRECOMP_ENABLE_REPLACEMENTS)\n");
     fprintf(out, "int dolrecomp_dispatch_replacement(CPUState* ctx, u32 address);\n");
