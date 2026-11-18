@@ -985,6 +985,16 @@ void DrawTrainingHud()
   ImGui::End();
 }
 
+// 4:3 and the game's 16:9 mode do not go together: the anamorphic picture was
+// squeezed into a 4:3 box (RingOut#28). While 4:3 is chosen, Widescreen is off
+// and greyed out; choosing 4:3 turns it off, and leaving 4:3 for 16:9 or Auto
+// turns it back on if 4:3 was what turned it off.
+bool WidescreenBlockedBy43()
+{
+  return Config::Get(Config::GFX_ASPECT_RATIO) == AspectMode::ForceStandard;
+}
+bool s_widescreen_off_for_43 = false;
+
 const char* ItemLabel(Item item)
 {
   switch (item)
@@ -1383,6 +1393,8 @@ std::string ItemValue(Item item, int state_slot, int netplay_mode,
     // session has to be built from boot.
     return netplay_mode == 0 ? "-" : "RESTARTS GAME";
   case Item::Widescreen:
+    if (WidescreenBlockedBy43())
+      return "OFF (4:3)";
     return RecompWidescreen::IsEnabled() ? "ON" : "OFF";
   case Item::ScreenShape:
     // The shape rewrites the game's own constants, which netplay and replays
@@ -1771,6 +1783,7 @@ void ToggleWidescreen()
   RecompWidescreen::Toggle();
 }
 
+
 // Returns true if a Config value changed and needs flushing. The flush itself
 // (Config::Save) must happen with the menu mutex released -- see OnKey.
 bool AdjustItem(Item item, int direction, State& state)
@@ -1831,6 +1844,8 @@ bool AdjustItem(Item item, int direction, State& state)
   case Item::NetplayStart:
     break;   // an action, not a value
   case Item::Widescreen:
+    if (WidescreenBlockedBy43())
+      return false;
     ToggleWidescreen();
     break;
   case Item::ScreenShape:
@@ -1860,7 +1875,21 @@ bool AdjustItem(Item item, int direction, State& state)
       if (kModes[i] == current)
         index = static_cast<int>(i);
     index = std::clamp(index + direction, 0, static_cast<int>(kModes.size()) - 1);
-    Config::SetBase(Config::GFX_ASPECT_RATIO, kModes[index]);
+    const AspectMode next = kModes[index];
+    if (next == AspectMode::ForceStandard && RecompWidescreen::IsEnabled())
+    {
+      // Refused in netplay or a replay: then 4:3 is refused with it.
+      if (!RecompWidescreen::Toggle())
+        return false;
+      s_widescreen_off_for_43 = true;
+    }
+    else if (current == AspectMode::ForceStandard && next != AspectMode::ForceStandard)
+    {
+      if (s_widescreen_off_for_43 && next != AspectMode::Stretch && !RecompWidescreen::IsEnabled())
+        RecompWidescreen::Toggle();
+      s_widescreen_off_for_43 = false;
+    }
+    Config::SetBase(Config::GFX_ASPECT_RATIO, next);
     break;
   }
   case Item::LensFlares:
@@ -3275,6 +3304,7 @@ void Draw()
   bool applied_now = false;
   // label, value, highlight-value-green
   std::vector<std::tuple<std::string, std::string, bool>> rows;
+  std::vector<bool> greyed;  // rows shown but not available right now
 
   {
     std::lock_guard<std::mutex> guard(s_state.mutex);
@@ -3434,6 +3464,7 @@ void Draw()
         preview_absent = "no picture for this slot";
       }
       for (const Item item : TabItems(tab))
+      {
         rows.emplace_back(ItemLabel(item),
                           ItemValue(item, state_slot, s_state.netplay_mode,
                                     s_state.netplay_port,
@@ -3445,6 +3476,9 @@ void Draw()
                                     s_state.netplay_scanning,
                                     s_state.netplay_scanned),
                           false);
+        greyed.resize(rows.size());
+        greyed.back() = item == Item::Widescreen && WidescreenBlockedBy43();
+      }
       break;
     }
   }
@@ -3647,7 +3681,10 @@ void Draw()
     for (size_t i = 0; !grid_tab && i < rows.size(); ++i)
     {
       const bool is_selected = static_cast<int>(i) + 1 == selected;
-      const ImVec4 color = is_selected ? ImVec4(1.0f, 1.0f, 0.45f, 1.0f) :
+      const bool grey = i < greyed.size() && greyed[i];
+      const ImVec4 color = grey        ? (is_selected ? ImVec4(0.62f, 0.62f, 0.40f, 1.0f) :
+                                                        ImVec4(0.45f, 0.45f, 0.45f, 1.0f)) :
+                           is_selected ? ImVec4(1.0f, 1.0f, 0.45f, 1.0f) :
                                          ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
 
       ImGui::TextColored(color, "%s %s", is_selected ? ">" : " ", std::get<0>(rows[i]).c_str());

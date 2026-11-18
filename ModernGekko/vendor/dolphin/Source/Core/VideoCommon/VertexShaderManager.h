@@ -33,6 +33,10 @@ public:
   bool OrthoSqueezeWouldApply() const;
   bool IsOrthoFullWidth() const { return m_ortho_full_width; }
   void SetOrthoFullWidth(bool full) { m_ortho_full_width = full; }
+  // A 2D draw of an effect the game projected from the 3D scene: it takes the
+  // 3D's factor, so it stays on what it belongs to (RecompOrthoSqueeze.h).
+  bool IsOrthoSceneEffect() const { return m_ortho_scene_effect; }
+  void SetOrthoSceneEffect(bool effect) { m_ortho_scene_effect = effect; }
   // How the draws being batched sit against a screen edge
   // (RecompOrthoSqueeze::EdgeAnchor). Changing it needs a flush first.
   const RecompOrthoSqueeze::EdgeMap& OrthoEdge() const { return m_ortho_edge; }
@@ -41,6 +45,8 @@ public:
   // width (StaticRecompRenderLayerHook.h); reset at each XFB copy.
   bool InSceneEffect() const { return m_in_scene_effect; }
   void SetInSceneEffect(bool effect) { m_in_scene_effect = effect; }
+  // Character select's off-centre models (RecompOrthoSqueeze::OffCentreModels).
+  RecompOrthoSqueeze::OffCentreModels& SelectModels() { return m_select_models; }
   void SetConstants(std::span<const std::string> textures, XFStateManager& xf_state_manager);
 
   // data: 3 floats representing the X, Y and Z vertex model coordinates and the posmatrix index.
@@ -103,8 +109,11 @@ private:
   float m_ortho_squeeze_loaded = 1.0f;
   float m_ortho_shift_loaded = 0.0f;
   bool m_ortho_full_width = false;
+  bool m_ortho_scene_effect = false;
   RecompOrthoSqueeze::EdgeMap m_ortho_edge;
   bool m_in_scene_effect = false;
+  RecompOrthoSqueeze::OffCentreModels m_select_models;
+  float Factor3DNow() const;
   float OrthoSqueezeNow() const;
   float OrthoShiftNow() const;
 

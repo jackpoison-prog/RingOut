@@ -223,6 +223,16 @@ void OnFrame(Core::System& system)
     Config::SetBase(Config::GFX_NATIVE_WIDESCREEN, true);
   }
 
+  // 4:3 shows the game's 4:3 mode only. With the 16:9 mode on, the anamorphic
+  // picture was squeezed into a 4:3 box (RingOut#28); the VIDEO tab greys
+  // Widescreen out while 4:3 is chosen, and this also catches a config saved
+  // with both.
+  if (Config::GetBase(Config::GFX_ASPECT_RATIO) == AspectMode::ForceStandard &&
+      Config::Get(Config::GFX_NATIVE_WIDESCREEN) && GuestWritesAllowed(system))
+  {
+    Config::SetBase(Config::GFX_NATIVE_WIDESCREEN, false);
+  }
+
   bool game_wide = memory.Read_U8(object + kFlagOffset) != 0;
   const bool want = Config::Get(Config::GFX_NATIVE_WIDESCREEN);
 
@@ -279,6 +289,7 @@ void OnFrame(Core::System& system)
   if (!managed)
   {
     RecompOrthoSqueeze::g_factor.store(1.0f, std::memory_order_relaxed);
+    RecompOrthoSqueeze::g_3d_factor.store(1.0f, std::memory_order_relaxed);
     RecompOrthoSqueeze::g_3d_follows_2d.store(false, std::memory_order_relaxed);
     return;
   }
@@ -287,6 +298,9 @@ void OnFrame(Core::System& system)
   // The 2D follows the display: narrowed only while it shows our shape.
   RecompOrthoSqueeze::g_factor.store(pair ? RecompScreenShape::OrthoSqueeze(shown) : 1.0f,
                                      std::memory_order_relaxed);
+  // The 3D follows the display too: the game draws it for 16:9 at every shape.
+  RecompOrthoSqueeze::g_3d_factor.store(
+      pair ? RecompScreenShape::PerspectiveSqueeze(shown) : 1.0f, std::memory_order_relaxed);
   RecompOrthoSqueeze::g_3d_follows_2d.store(pair && FaceOffShowing(memory),
                                             std::memory_order_relaxed);
   const AspectMode desired =

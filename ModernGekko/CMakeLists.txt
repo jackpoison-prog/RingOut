@@ -636,6 +636,14 @@ if(BUILD_TESTING)
     target_compile_features(moderngekko_screen_shape_test PRIVATE cxx_std_17)
     add_test(NAME moderngekko.screen_shape COMMAND moderngekko_screen_shape_test)
 
+    # The Steam Deck's own controls: which pads move onto them and how their
+    # bindings are renamed (deck_native_pad.hpp, no Dolphin dependencies).
+    add_executable(moderngekko_deck_native_pad_test tests/deck_native_pad_test.cpp)
+    target_include_directories(moderngekko_deck_native_pad_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime")
+    target_compile_features(moderngekko_deck_native_pad_test PRIVATE cxx_std_20)
+    add_test(NAME moderngekko.deck_native_pad COMMAND moderngekko_deck_native_pad_test)
+
     # Smooth Motion: draw alignment, blend, per-refresh pacing and when the
     # option is offered (RecompSmoothMotionMath.h, no Dolphin dependencies).
     add_executable(moderngekko_smooth_motion_test tests/smooth_motion_test.cpp)

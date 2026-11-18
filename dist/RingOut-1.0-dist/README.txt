@@ -119,9 +119,20 @@ HEIHACHI (from your PS2 disc)
       ./setup.sh --heihachi /path/to/ps2.iso /path/to/your/disc.iso
   Both guests at once:
       ./setup.sh --spawn /path/to/xbox.iso --heihachi /path/to/ps2.iso /path/to/your/disc.iso
+  On Windows the first run offers to add them and asks for the disc images.
+  Later, use "Add guest fighters" in the Start menu (or run
+  RingOut.exe --add-guests): it asks for your GameCube disc and theirs, and
+  rebuilds the game. The same options from PowerShell in the game's folder
+  are -Spawn and -Heihachi:
+      .\setup.ps1 C:\path\to\your\disc.iso -Spawn C:\path\to\xbox.iso -Heihachi C:\path\to\ps2.iso
+      .\setup.ps1 -Spawn C:\path\to\xbox.iso      (add him to this install)
   Everything above about Spawn holds for him too. A guest already
   installed is kept only when its image is given again: adding Heihachi to
   an install that has Spawn needs both --spawn and --heihachi.
+  Each disc also has its own cut of the opening movie, with its guest in
+  it. Setup copies those too (about 400 MB for the Xbox one, 150 MB for
+  the PS2 one), and the opening movie then alternates between the
+  GameCube's, Spawn's and Heihachi's each time it plays.
 
 REQUIREMENTS
   - A GameCube disc image you already have

@@ -135,6 +135,42 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.game)), ['files', 'guests', 'sys'])
         self.assertTrue(os.path.isfile(self.log))
 
+    # ---- the guests' opening movies
+    MOVIE = b'\x00\x00\x01\xba' + b'sofdec' * 900
+
+    def afs(self, movie=None):
+        movie = self.MOVIE if movie is None else movie
+        return b'AFS\0' + struct.pack('<III', 1, 2048, len(movie)) + bytes(2048 - 16) + movie
+
+    def intro(self, name):
+        p = os.path.join(self.game, 'guests', name)
+        if not os.path.isfile(p): return None
+        with open(p, 'rb') as f: return f.read()
+
+    def test_no_movie_no_intro(self):
+        self.assertEqual(self.run_(), (0, 'Spawn built'))
+        self.assertEqual(sorted(os.listdir(os.path.join(self.game, 'guests'))), ['guests.json', 'root-guests.olk'])
+
+    def test_intros_copied_from_both_discs(self):
+        make_image(self.image, {'root.olk': XROOT, 'Default.xbe': XBE, 'movie.afs': self.afs()})
+        make_ps2_image(self.ps2, {'ROOT.OLK': PROOT, 'SLUS_206.43': PELF, 'MOVIE.AFS': self.afs(self.MOVIE + b'ps2')})
+        self.assertEqual(self.run_(heihachi=True), (0, 'Spawn and Heihachi built'))
+        self.assertEqual(self.intro('intro-spawn.sfd'), self.MOVIE)
+        self.assertEqual(self.intro('intro-heihachi.sfd'), self.MOVIE + b'ps2')
+
+    def test_a_bad_movie_archive_does_not_fail_the_guests(self):
+        make_image(self.image, {'root.olk': XROOT, 'Default.xbe': XBE, 'movie.afs': self.afs(b'not a movie')})
+        self.assertEqual(self.run_(), (0, 'Spawn built'))
+        self.assertIsNone(self.intro('intro-spawn.sfd'))
+
+    def test_already_built_install_gains_its_intro(self):
+        self.run_()
+        make_image(self.image, {'root.olk': XROOT, 'Default.xbe': XBE, 'movie.afs': self.afs()})
+        b = Fake()
+        self.assertEqual(self.run_(build=b), (0, 'Spawn already built'))
+        self.assertEqual(b.calls, 0)
+        self.assertEqual(self.intro('intro-spawn.sfd'), self.MOVIE)
+
     def test_already_built_does_no_work(self):
         self.run_(); b = Fake()
         self.assertEqual(self.run_(build=b), (0, 'Spawn already built'))

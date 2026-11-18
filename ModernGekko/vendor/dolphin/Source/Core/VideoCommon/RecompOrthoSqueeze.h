@@ -19,18 +19,25 @@ inline std::atomic<float> g_factor{1.0f};
 // over its name). Written with g_factor; read the same way.
 inline std::atomic<bool> g_3d_follows_2d{false};
 
+// Horizontal factor for 3D (perspective) draws: RecompScreenShape::
+// PerspectiveSqueeze of the shape on screen, 1 otherwise. The game draws its 3D
+// for 16:9 at every shape, so without this the display stretches it. Effects
+// the game projected from the 3D scene and drew in 2D (the scene-effect mark)
+// take it too, so they stay on what they belong to. Written with g_factor.
+inline std::atomic<float> g_3d_factor{1.0f};
+
 // A draw spanning the whole screen width -- a fade, a flash, the pause dim, a
 // cinema bar -- is meant to cover the screen and is left full width. lo and hi
 // are its x extent in unsqueezed clip space, where the screen is -1..1.
 // Apply factor k to a projection (4x4, row-major, as VertexShaderManager
 // builds it). 2D: x scale and x translation, narrowing it around the centre.
-// 3D: k is 1 unless g_3d_follows_2d, and then x scale and the off-centre term
-// narrow with the 2D. Otherwise the game's own constants already widen a 3D
-// view -- including the character-select model, whose camera the game shifts
-// sideways to sit beside its 2D: it used to move in with the 2D, but the side
-// panels it stands in now reach the screen edges (EdgeAnchor), and unmoved it
-// stands in their middle.
-inline void ApplyToProjection(float* m, bool orthographic, float k)
+// 3D: x scale by g_3d_factor, around the point the camera looks at. The
+// off-centre term stays: the character-select model's camera is shifted to
+// stand it in its side panel, and scaled with the rest it moved in toward the
+// middle (measured 2026-11-16, 21:9). On the face-off screen, whose fighters are
+// laid out with its 2D (g_3d_follows_2d), x scale and off-centre term both take
+// the 2D's factor.
+inline void ApplyToProjection(float* m, bool orthographic, float k, bool off_centre_too = true)
 {
   if (orthographic)
   {
@@ -40,7 +47,8 @@ inline void ApplyToProjection(float* m, bool orthographic, float k)
   else
   {
     m[0] *= k;
-    m[2] *= k;
+    if (off_centre_too)
+      m[2] *= k;
   }
 }
 
@@ -127,4 +135,158 @@ inline EdgeMap OnAnchor(float lo, float hi, unsigned vertices, const Anchor& las
     return {};
   return last.map;
 }
+
+// Character select stands each chosen fighter in its side panel through an
+// off-centre camera, which the shape leaves where it is, while the fighter's
+// name under it narrows with the rest of the 2D: at 32:9 the name sat halfway
+// to the middle (measured 2026-11-17). So small 2D draws under such a model keep
+// their 16:9 place, which is under it, as in the original. The models are those
+// drawn with an off-centre perspective (|m2| over 0.2; the fight and the
+// face-off use centred cameras); a model's centre on screen is -m2. A frame's
+// 2D is matched against the models of the frame before, since either may come
+// first. Video thread only.
+struct OffCentreModels
+{
+  static constexpr int kMax = 2;  // one per side in a two-player select
+  float seen[kMax] = {};
+  int n_seen = 0;
+  float last[kMax] = {};
+  int n_last = 0;
+  // Where each side's model actually stands on screen (index 0 left, 1 right):
+  // the mean of its draws' origins as displayed. The game moves the model a
+  // little with the shape, so its camera's -m2 is not quite it. Kept from the
+  // last frame that drew the model, for the silhouette that comes first.
+  float body_sum[2] = {};
+  int body_n[2] = {};
+  float body[2] = {};
+  bool has_body[2] = {};
+
+  void NoteBody(float x)
+  {
+    const int side = x < 0.0f ? 0 : 1;
+    body_sum[side] += x;
+    ++body_n[side];
+  }
+
+  void Note(float m2)
+  {
+    if (m2 > -0.2f && m2 < 0.2f)
+      return;
+    NoteCentre(-m2);
+  }
+
+  // A model's centre on screen, from its camera or from its silhouette.
+  void NoteCentre(float centre)
+  {
+    for (int i = 0; i < n_seen; ++i)
+    {
+      if (seen[i] - centre < 0.05f && centre - seen[i] < 0.05f)
+        return;
+    }
+    if (n_seen < kMax)
+      seen[n_seen++] = centre;
+  }
+
+  void OnFrame()
+  {
+    for (int i = 0; i < kMax; ++i)
+      last[i] = seen[i];
+    n_last = n_seen;
+    n_seen = 0;
+    for (int side = 0; side < 2; ++side)
+    {
+      if (body_n[side] > 0)
+      {
+        body[side] = body_sum[side] / static_cast<float>(body_n[side]);
+        has_body[side] = true;
+      }
+      body_sum[side] = 0.0f;
+      body_n[side] = 0;
+    }
+  }
+
+  // The model on the side of x (left or right of the middle), from last frame,
+  // or nothing.
+  bool OnSide(float x, float* centre) const
+  {
+    for (int i = 0; i < n_last; ++i)
+    {
+      if ((last[i] < 0.0f) == (x < 0.0f))
+      {
+        *centre = last[i];
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // The fighter's name, under the model: a 2D draw in the strip along the
+  // bottom (its top below -0.6 in clip y; the glyphs span -0.95..-0.78),
+  // narrower than a panel, on a model's side of the screen and clear of the
+  // portrait grid in the middle (|x| over 0.35) -- including while the name
+  // slides in from off the edge. It is narrowed by k like the rest of the 2D,
+  // but around the model's centre instead of the screen's, so it ends under the
+  // model at its narrowed width. Only the bottom strip: the costume hint along
+  // the top and the "Select character." box beside the model are one line of
+  // draws each, and moving the part near the model split them (2026-11-17).
+  // `on` false for any other draw. lo, hi: x extent; y_top: the top of the y
+  // extent, both in unsqueezed clip space.
+  EdgeMap Under(float lo, float hi, float y_top, float k) const
+  {
+    if (hi - lo > 0.6f || y_top > -0.6f)
+      return {};
+    const float x = 0.5f * (lo + hi);
+    float c;
+    if ((x > -0.35f && x < 0.35f) || !OnSide(x, &c))
+      return {};
+    return {true, k, c * (1.0f - k)};
+  }
+};
+
+// When a fighter is picked, character select shows a flat silhouette of it --
+// a full-height 2D image that slides in from off the screen edge, widening as it
+// comes (from 0.04 to 0.7 in clip space at 16:9: right side -1.27 to -0.3), and
+// stops centred on the model, which then grows out of it. The model keeps its
+// place and takes the 3D's width, so the silhouette must too, all the way in: as
+// an edge or an overhanging draw it was stretched to the screen edge or pulled
+// in to the middle, and stood larger and beside the model at every shape but
+// 16:9 (measured 2026-11-17). Not the panel behind it (0.8 wide) nor the pillar
+// strip along the edge (from exactly the edge, 0.05 wide).
+// The map narrowing it by k3d around the model's centre `c` (negative on the
+// left), or `on` false.
+inline bool IsSelectSilhouette(float lo, float hi, float y_lo, float y_hi)
+{
+  constexpr float kTol = 0.002f;
+  if (y_lo > -kEdge || y_hi < kEdge)
+    return false;
+  // Mirror the right side onto the left.
+  if (lo > 0.0f)
+  {
+    const float l = -hi;
+    hi = -lo;
+    lo = l;
+  }
+  const float w = hi - lo;
+  if (w <= 0.0f || w > 0.71f || hi < -1.32f || hi > -0.29f)
+    return false;
+  const bool from_edge = lo > -1.0f - kTol && lo < -1.0f + kTol;
+  return !(from_edge && w < 0.69f);
+}
+
+// The silhouette at rest spans -1..-0.3 at 16:9 (mirrored on the right), so
+// its centre is -0.65: narrowed by k3d, that centre goes to `target`, where the
+// model stands.
+inline constexpr float kSilhouetteRestCentre = 0.65f;
+
+inline EdgeMap SelectSilhouette(float lo, float hi, float y_lo, float y_hi, float target, float k3d)
+{
+  if (!IsSelectSilhouette(lo, hi, y_lo, y_hi))
+    return {};
+  const float rest = target < 0.0f ? -kSilhouetteRestCentre : kSilhouetteRestCentre;
+  return {true, k3d, target - k3d * rest};
+}
+
+// Where character select stands the 1P model at 16:9 (-m2 of its camera); the
+// 2P model mirrors it. For the first silhouette, before any model is drawn.
+inline constexpr float kSelectModelX = 0.6438f;
 }

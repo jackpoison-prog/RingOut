@@ -74,6 +74,13 @@ Copy-Item (Join-Path $BinDir 'dolrecomp.exe')       (Join-Path $stage 'tools') -
 # so the bundled embeddable Python runs it with nothing added.
 Copy-Item (Join-Path $RepoRoot 'dist\shared\gc-art.py') (Join-Path $stage 'tools') -Force
 Copy-Item (Join-Path $RepoRoot 'dist\shared\steam_shortcut.py') (Join-Path $stage 'tools') -Force
+# The guest converters (setup.ps1 -Spawn / -Heihachi), as package-dist.sh: sources only, standard
+# library only, run by the bundled Python; the sound encoder is compiled by the bundled clang.
+foreach ($d in 'spawn', 'heihachi', 'guests') {
+    New-Item -ItemType Directory -Force -Path (Join-Path $stage "tools\$d") | Out-Null
+    Copy-Item (Join-Path $RepoRoot "tools\$d\*.py") (Join-Path $stage "tools\$d") -Force
+}
+Copy-Item (Join-Path $RepoRoot 'tools\guests\dspenc.c') (Join-Path $stage 'tools\guests') -Force
 
 # The runtime imports MSVCP140 / VCRUNTIME140; shipping the redist DLLs beats
 # telling players to go and install the C++ redistributable first.

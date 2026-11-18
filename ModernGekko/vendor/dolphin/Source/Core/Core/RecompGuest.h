@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Core
 {
@@ -33,6 +34,11 @@ const std::string& GuestsHash();
 const RecompGuestTables::Installed& InstalledGuests();
 // The reason guests are unavailable, for the menu and the log.
 const std::string& Unavailable();
+
+// The installed guests' own opening movies (each disc's cut of the intro, copied by setup beside the
+// archive), Spawn's first: host paths of those present. Empty when guests are unavailable. The movie
+// player shows them in turn with the game's own; nothing else reads them.
+std::vector<std::string> IntroMovies();
 
 // Decided once, before boot. Ignored (stays off) when guests are not available.
 void SetSession(bool on);

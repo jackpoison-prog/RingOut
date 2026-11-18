@@ -50,7 +50,10 @@ struct Constant
   // names, before a stage): the game places those fighters through the HUD
   // inverse map, and at its wide value they land past their names -- off the
   // screen at 32:9. At 16:9 each stands over its name, the GPU narrowing the
-  // screen's 2D and 3D alike (RecompOrthoSqueeze::g_3d_follows_2d).
+  // screen's 2D and 3D alike (RecompOrthoSqueeze::g_3d_follows_2d). The 3D
+  // factor is held too: at its wide value the game moves each fighter out by it,
+  // so they stood at the same place on screen at every shape while their names
+  // narrowed with the 2D (2.0.1, 21:9 and 32:9; measured 2026-11-17).
   bool face_off_16x9 = false;
 };
 
@@ -87,7 +90,7 @@ namespace detail
 // narrowed those positions twice while the sizes shrank once: at 21:9 the
 // portrait frames overlapped their neighbours. PAL's twin is 0x80475640.
 constexpr std::array<Constant, 4> kUsConstants = {{
-    {0x804626B0, 0x3F9EE584, Role::Factor},   // 1.24138, 3D aspect (80085174/852F8/85790)
+    {0x804626B0, 0x3F9EE584, Role::Factor, true},   // 1.24138, 3D aspect (80085174/852F8/85790)
     {0x80464030, 0x3F4E38E4, Role::Squeeze, true},  // 0.80556, menu/HUD inverse map
     {0x8046402C, 0xC278E38C, Role::Offset, true},   // -62.222, menu/HUD inverse map
     {0x80464608, 0x3F4E38E4, Role::Squeeze},  // 0.80556 (80150CB8)
@@ -97,7 +100,7 @@ constexpr std::array<Constant, 4> kUsConstants = {{
 // as on US). JP has none of these values -- its wide mode is built differently
 // (no IsWide(), no squeeze helpers) -- so it stays at 16:9.
 constexpr std::array<Constant, 4> kPalConstants = {{
-    {0x80476828, 0x3F9EE584, Role::Factor},   // 1.24138, 3D aspect (80085E18/85F9C/86434)
+    {0x80476828, 0x3F9EE584, Role::Factor, true},   // 1.24138, 3D aspect (80085E18/85F9C/86434)
     {0x80478228, 0x3F4E38E4, Role::Squeeze, true},  // 0.80556, menu/HUD inverse map
     {0x80478224, 0xC278E38C, Role::Offset, true},   // -62.222, menu/HUD inverse map
     {0x80478828, 0x3F4E38E4, Role::Squeeze},  // 0.80556 (8015A9FC)
@@ -255,6 +258,18 @@ inline float OrthoSqueeze(Shape s)
 {
   const double k = detail::Aspect(Shape::Wide16x9) / detail::Aspect(s);
   return k < 1.0 ? static_cast<float>(k) : 1.0f;
+}
+
+// The game's 3D is rendered for 16:9 at every shape: the Factor constant above
+// moves cameras (it scales a camera offset fed to the position setter at
+// 800A4EEC), it does not widen the field of view. Measured 2026-11-16 from raw
+// frame dumps: the same fight frame at 16:9, 16:10 and 21:9 drew the same 3D,
+// so the display stretched it -- 33% too wide at 21:9, 10% too narrow at 16:10.
+// The video backend therefore scales the x of every perspective draw by this,
+// both ways: below 1 on a wider shape (a wider view), above 1 on a narrower one.
+inline float PerspectiveSqueeze(Shape s)
+{
+  return static_cast<float>(detail::Aspect(Shape::Wide16x9) / detail::Aspect(s));
 }
 
 // Movies are 16:9 video and would stretch to an ultrawide shape, so while one

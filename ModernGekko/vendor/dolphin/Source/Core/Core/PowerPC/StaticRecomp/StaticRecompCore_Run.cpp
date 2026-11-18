@@ -130,6 +130,41 @@ bool FindMovieInAfs(int fno, std::string* out)
   return true;
 }
 
+// Which opening movie this play of movie 0 shows: the game's own first, then each installed guest's
+// disc's cut (Spawn's from the Xbox disc, Heihachi's from the PS2 disc), then round again. Empty is
+// the game's own. The three are the same film frame for frame apart from the guest's scenes (4464
+// frames each, measured), so the game's decoder keeps the pacing and its own soundtrack fits.
+// RINGOUT_INTRO=<n> (testing) holds entry n of that list.
+std::string NextIntro()
+{
+  static unsigned s_plays = 0;
+  std::vector<std::string> list{std::string()};
+  for (std::string& p : RecompGuest::IntroMovies())
+    list.push_back(std::move(p));
+  if (const char* e = std::getenv("RINGOUT_INTRO"))
+    return list[static_cast<unsigned>(std::atoi(e)) % list.size()];
+  return list[s_plays++ % list.size()];
+}
+
+// Whether movie fno has a hand-made replacement for the player to show: a loose
+// movie<fno>.sfd where the player looks for one (STATICRECOMP_FMV_DIR, or the
+// user dir's fmv/, ./fmv, work/fmv), or an archive named with STATICRECOMP_FMV_AFS.
+static bool HasReplacement(int fno)
+{
+  if (std::getenv("STATICRECOMP_FMV_AFS") != nullptr)
+    return true;
+  const std::string name = "/movie" + std::to_string(fno) + ".sfd";
+  if (const char* dir = std::getenv("STATICRECOMP_FMV_DIR"))
+    return File::Exists(dir + name);
+  for (const std::string& c : {File::GetUserPath(D_USER_IDX) + "fmv", std::string("fmv"),
+                               std::string("work/fmv")})
+  {
+    if (File::Exists(c + name))
+      return true;
+  }
+  return false;
+}
+
 // --- FMV HLE native player -------------------------------------------------
 // Decodes a Sofdec movie (from the game's movie.afs, or an extracted
 // <dir>/movie<fno>.sfd) with ffmpeg into raw ARGB8888 frames on a reader
@@ -153,12 +188,26 @@ public:
   // an active exception") and dumped core on every exit that played an FMV.
   ~FmvPlayer() { Stop(); }
 
-  void Start(int fno)
+  // Arms the player for movie fno, or leaves the movie to the game's own
+  // decoder and returns false. The game's decoder is the default: its frame
+  // converter applies colour effects the movie data does not carry -- the
+  // intro darkens and tints whole scenes from the statue on, by a different
+  // linear transform per frame -- and ffmpeg's frames, written over the
+  // converter, showed those scenes far too bright (RingOut#23, measured
+  // 2026-11-17: identical pixels for frames 0-470, then luma at ~0.45x and
+  // chroma at ~0.3-0.5x in the game's). It is also the cheaper path (d0bea763).
+  // The player takes over only where the game cannot play the movie itself: a
+  // guest's opening cut, or a hand-made replacement .sfd.
+  bool Start(int fno)
   {
     Stop();
+    m_intro = fno == 0 ? NextIntro() : std::string();
+    if (m_intro.empty() && !HasReplacement(fno))
+      return false;
     m_fno = fno;
     m_open = false;
     m_paced_started = false;
+    return true;
   }
 
   // Lazily opens the pipe once the frame dimensions are known (from CnvFrm).
@@ -177,6 +226,9 @@ public:
     // failed to open the file, so video went black while audio, which this hook
     // does not touch, kept playing.
     std::string base;
+    // The opening movie may be a guest disc's cut this time; then none of the lookup below applies.
+    std::string input = m_intro;
+    const bool guest_intro = !input.empty();
     if (const char* dir = std::getenv("STATICRECOMP_FMV_DIR"))
     {
       base = dir;
@@ -202,8 +254,11 @@ public:
     // is the normal path -- extracted .sfd files are a development convenience,
     // and expecting them is why the takeover silently never engaged in any
     // shipped package or profiling run.
-    std::string input;
-    if (!base.empty())
+    if (guest_intro)
+    {
+      // already resolved
+    }
+    else if (!base.empty())
     {
       input = base + "/movie" + std::to_string(m_fno) + ".sfd";
     }
@@ -218,15 +273,18 @@ public:
       return;
     }
 
+    // A guest disc's stream: the PS2's is MPEG-2 flagged at half its real rate, and ffmpeg then
+    // drops every other frame (2234 of 4464). Reading it at the film's own rate keeps them all.
+    const char* const rate = guest_intro ? "-r 30000/1001 " : "";
     char cmd[1280];
     // cmd.exe does not treat '...' as quoting -- it would pass the quotes
     // through as part of the path -- so the argument is double-quoted there.
 #ifdef _WIN32
-    std::snprintf(cmd, sizeof(cmd), "ffmpeg -v error -i \"%s\" -f rawvideo -pix_fmt argb -",
-                  input.c_str());
+    std::snprintf(cmd, sizeof(cmd), "ffmpeg -v error %s-i \"%s\" -f rawvideo -pix_fmt argb -",
+                  rate, input.c_str());
 #else
-    std::snprintf(cmd, sizeof(cmd), "ffmpeg -v error -i '%s' -f rawvideo -pix_fmt argb -",
-                  input.c_str());
+    std::snprintf(cmd, sizeof(cmd), "ffmpeg -v error %s-i '%s' -f rawvideo -pix_fmt argb -",
+                  rate, input.c_str());
 #endif
     m_pipe = RINGOUT_POPEN(cmd, RINGOUT_POPEN_MODE);
     m_stop = false;
@@ -364,6 +422,7 @@ private:
   s64 m_index = -1;  // frame number of m_last; -1 before the first
   std::atomic<bool> m_stop{false};
   int m_fno = -1;
+  std::string m_intro;  // a guest's opening cut for this play of movie 0, or empty
   u32 m_w = 0, m_h = 0;
   size_t m_frame_bytes = 0;
   bool m_open = false;
@@ -458,9 +517,9 @@ void StaticRecompCore::OnFmvStartAfs(u32 fno, u32 patid, u32 handle)
     s_fmv.Stop();   // resets m_fno to -1, so Active() really is false
     return;
   }
-  std::fprintf(stderr, "[fmv-hle] mwPlyStartAfs: movie fno=%u patid=%u handle=0x%08X\n",
-               fno, patid, handle);
-  s_fmv.Start(static_cast<int>(fno));
+  const bool ours = s_fmv.Start(static_cast<int>(fno));
+  std::fprintf(stderr, "[fmv-hle] mwPlyStartAfs: movie fno=%u patid=%u handle=0x%08X: %s\n",
+               fno, patid, handle, ours ? "player" : "the game's own decoder");
 }
 
 // Decode-skip takeover: fill the frame descriptor the game's getfrm normally
@@ -883,11 +942,13 @@ void StaticRecompCore::Run()
           // never match.
           if (m_guest.pc == fmv.start_afs)  // mwPlyStartAfs(r3=handle,r4=patid,r5=fno)
             OnFmvStartAfs(m_guest.gpr[5], m_guest.gpr[4], m_guest.gpr[3]);
+          // Movies show at 16:9, not stretched, whichever decoder plays them.
+          if (m_guest.pc == fmv.cnv_frm)
+            RecompWidescreen::NoteMovieFrame();
           if (s_fmv.Active())
           {
             if (m_guest.pc == fmv.cnv_frm)  // mwPlyFxCnvFrmARGB(r3=hnd,r4=desc,r5=dst)
             {
-              RecompWidescreen::NoteMovieFrame();  // movies show at 16:9, not stretched
               // Replace the YUV->ARGB conversion: fill the destination buffer
               // natively and return to the caller, skipping the guest function.
               OnFmvCnvFrm(m_guest.gpr[3], m_guest.gpr[4], m_guest.gpr[5]);

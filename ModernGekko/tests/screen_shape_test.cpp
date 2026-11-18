@@ -141,7 +141,7 @@ void TestGuardAndWrites() {
     const Constant& c = *ByAddress(*t, x.address);
     ram.words[x.address] = x.bits;
     Check(x.bits == (c.face_off_16x9 ? c.original_bits : ValueBits(c, Shape::Super32x9)),
-          "face-off: inverse map at 16:9, the rest at 32:9");
+          "face-off: the held ones at 16:9, the rest at 32:9");
   }
   bool fo = false;
   Check(CurrentShape(*t, FakeRam::Read, &ram, &fo) == Shape::Super32x9 && fo,
@@ -150,8 +150,8 @@ void TestGuardAndWrites() {
   w = Writes(*t, FakeRam::Read, &ram, Shape::Super32x9);
   Check(w.size() == 4, "leaving the face-off restores the wide set");
   Check(ByAddress(*t, 0x80464030)->face_off_16x9 && ByAddress(*t, 0x8046402C)->face_off_16x9 &&
-            !ByAddress(*t, 0x804626B0)->face_off_16x9 && !ByAddress(*t, 0x80464608)->face_off_16x9,
-        "only the inverse map is held");
+            ByAddress(*t, 0x804626B0)->face_off_16x9 && !ByAddress(*t, 0x80464608)->face_off_16x9,
+        "the inverse map and the 3D factor are held, the other squeeze is not");
 
   // Same game ID, other data at one address: a build the table was not made from.
   ram.Fill(*t, Shape::Wide16x9);
@@ -204,6 +204,18 @@ void TestOrthoSqueeze() {
   Check(Near(OrthoSqueeze(Shape::Ultra21x9), 0.75f), "21:9 (64:27): 2D in the middle 3/4");
   Check(Near(OrthoSqueeze(Shape::Super32x9), 0.5f), "32:9: 2D in the middle half");
   Check(OrthoSqueeze(Shape::Wide16x10) == 1.0f, "16:10 is narrower than 16:9: 2D untouched");
+}
+
+// The game renders its 3D for 16:9 whatever the shape: the wide-mode constants
+// move cameras, they do not change the field of view (measured 2026-11-16 from
+// raw frame dumps: the same fight frame at 16:9, 16:10 and 21:9 had the same 3D).
+// So the video backend reshapes perspective draws itself, both ways: narrower
+// on a wider shape (a wider view), wider on a narrower one.
+void TestPerspectiveSqueeze() {
+  Check(PerspectiveSqueeze(Shape::Wide16x9) == 1.0f, "16:9: 3D untouched");
+  Check(Near(PerspectiveSqueeze(Shape::Ultra21x9), 0.75f), "21:9: x scale 3/4, a wider view");
+  Check(Near(PerspectiveSqueeze(Shape::Super32x9), 0.5f), "32:9: x scale 1/2");
+  Check(Near(PerspectiveSqueeze(Shape::Wide16x10), 10.0f / 9.0f), "16:10: x scale 10/9, not squeezed");
 }
 
 // A 2D draw spanning the whole screen width -- a fade, a flash, the pause dim,
@@ -266,6 +278,10 @@ void TestApplyToProjection() {
   float persp[16] = {1.2f, 0, -0.4f, 0, 0, 1.6f, 0, 0, 0, 0, -1, -1, 0, 0, -1, 0};
   ApplyToProjection(persp, false, 1.0f);
   Check(persp[0] == 1.2f && persp[2] == -0.4f, "3D at k 1 (every screen but the face-off) is unchanged");
+  float scene[16] = {1.2f, 0, -0.4f, 0, 0, 1.6f, 0, 0, 0, 0, -1, -1, 0, 0, -1, 0};
+  ApplyToProjection(scene, false, 0.75f, false);
+  Check(Near(scene[0], 0.9f) && scene[2] == -0.4f && scene[5] == 1.6f,
+        "3D at a shape: x scale only; the off-centre term (the select model's panel) stays");
   float faceoff[16] = {1.2f, 0, -0.4f, 0, 0, 1.6f, 0, 0, 0, 0, -1, -1, 0, 0, -1, 0};
   ApplyToProjection(faceoff, false, 0.5f);
   Check(Near(faceoff[0], 0.6f) && Near(faceoff[2], -0.2f) && faceoff[5] == 1.6f,
@@ -305,6 +321,69 @@ void TestOnAnchor() {
   Check(!OnAnchor(-0.925f, -0.275f, 0, bar, k, 7).on, "nor by a line or point batch (passed as 0)");
 }
 
+// Character select at 32:9 (2026-11-17): Talim's camera has m2 0.6438, so she
+// stands at -0.64; her name's glyphs lie between -0.72 and -0.47 (16:9 clip x).
+void TestOffCentreModels() {
+  RecompOrthoSqueeze::OffCentreModels m;
+  const float k = 0.5f;
+  m.Note(0.6438f);
+  Check(!m.Under(-0.72f, -0.605f, -0.78f, k).on, "a model counts from the next frame");
+  m.OnFrame();
+  const RecompOrthoSqueeze::EdgeMap g = m.Under(-0.72f, -0.605f, -0.78f, k);
+  Check(g.on && m.Under(-0.588f, -0.473f, -0.78f, k).on, "the name's glyphs are under her");
+  Check(Near(g.a, k) && Near(g.a * -0.6438f + g.b, -0.6438f),
+        "narrowed by k around her centre: the name keeps its place under her and the HUD's width");
+  Check(!m.Under(-0.310f, -0.173f, -0.78f, k).on, "the portrait grid's left column is not");
+  Check(m.Under(-1.38f, -1.27f, -0.78f, k).on && m.Under(-1.0f, -0.88f, -0.78f, k).on,
+        "the name's glyphs while they slide in from off the edge");
+  Check(!m.Under(-0.72f, -0.605f, 0.95f, k).on, "the costume hint along the top is not");
+  Check(!m.Under(-0.72f, -0.605f, 0.1f, k).on, "the \"Select character.\" box beside her is not");
+  Check(!m.Under(-1.0f, -0.28f, -0.78f, k).on, "nor is the panel she stands in, which is wider");
+  m.Note(0.0f);
+  m.Note(0.1f);
+  m.OnFrame();
+  Check(!m.Under(-0.72f, -0.605f, -0.78f, k).on, "a centred camera (fight, face-off) is no select model");
+  m.Note(0.6438f);
+  m.Note(0.6440f);
+  m.Note(-0.6438f);
+  m.OnFrame();
+  Check(m.Under(0.5f, 0.7f, -0.78f, k).on && m.Under(-0.7f, -0.5f, -0.78f, k).on, "two players: one model per side");
+  float c = 0;
+  Check(m.OnSide(0.6f, &c) && c > 0.6f && m.OnSide(-0.6f, &c) && c < -0.6f, "each side finds its own model");
+}
+
+// Character select's silhouette (2026-11-17, 32:9 log): it slides in from off
+// the left edge, widening, and stops at -1..-0.3, full height, on Talim (-0.644).
+void TestSelectSilhouette() {
+  using RecompOrthoSqueeze::IsSelectSilhouette;
+  using RecompOrthoSqueeze::SelectSilhouette;
+  const auto at = [](const RecompOrthoSqueeze::EdgeMap& m, float x) { return m.a * x + m.b; };
+  const float c = -RecompOrthoSqueeze::kSelectModelX;
+  const RecompOrthoSqueeze::EdgeMap s = SelectSilhouette(-1.0f, -0.3f, -1.0f, 1.0f, -0.6f, 0.5f);
+  Check(s.on && Near(at(s, -0.65f), -0.6f) && Near(at(s, -0.3f) - at(s, -1.0f), 0.35f),
+        "at rest: its centre on where the model stands, at the model's width");
+  RecompOrthoSqueeze::OffCentreModels m;
+  m.NoteBody(-0.58f);
+  m.NoteBody(-0.62f);
+  m.NoteBody(0.7f);
+  m.OnFrame();
+  Check(m.has_body[0] && Near(m.body[0], -0.6f) && m.has_body[1] && Near(m.body[1], 0.7f),
+        "each side's model: the mean of where its draws stand");
+  m.OnFrame();
+  Check(m.has_body[0] && Near(m.body[0], -0.6f), "kept through frames without the model");
+  (void)c;
+  Check(IsSelectSilhouette(-1.308f, -1.270f, -1.0f, 1.0f) &&
+            IsSelectSilhouette(-1.151f, -0.957f, -1.0f, 1.0f) &&
+            IsSelectSilhouette(-1.030f, -0.680f, -1.0f, 1.0f),
+        "sliding in, off the edge and across it");
+  Check(!IsSelectSilhouette(-1.0f, -0.2f, -1.0f, 1.0f), "the panel behind it is not it");
+  Check(!IsSelectSilhouette(-1.0f, -0.95f, -1.0f, 1.0f), "the pillar strip is not it");
+  Check(!IsSelectSilhouette(-0.525f, 0.525f, -1.0f, 1.0f), "the portrait grid's backing is not it");
+  Check(!IsSelectSilhouette(-1.0f, -0.3f, -0.909f, 0.227f), "a part-height draw is not it");
+  Check(IsSelectSilhouette(0.3f, 1.0f, -1.0f, 1.0f) && !IsSelectSilhouette(0.95f, 1.0f, -1.0f, 1.0f),
+        "the 2P side's, and not its pillar");
+}
+
 }  // namespace
 
 int main() {
@@ -314,10 +393,13 @@ int main() {
   TestAspect();
   TestMovieGate();
   TestOrthoSqueeze();
+  TestPerspectiveSqueeze();
   TestFullWidthDraw();
   TestEdgeAnchor();
   TestOnAnchor();
   TestApplyToProjection();
+  TestOffCentreModels();
+  TestSelectSilhouette();
   if (g_failures == 0) std::printf("screen_shape: all checks passed\n");
   return g_failures == 0 ? 0 : 1;
 }

@@ -91,5 +91,33 @@ foreach ($DiscId in @('GRSEAF', 'GRSJAF', 'GRSPAF', 'GRSEPS', 'GQSE5D', 'ZZZZZZ'
     if ($bad.Count) { Write-Host ("FAIL {0}: {1}" -f $DiscId, ($bad -join '; ')); $failed++ }
     else { Write-Host ("ok   {0}" -f $DiscId) }
 }
+
+# 4. The guests' code sites: only with -Spawn or -Heihachi, only on the US disc, and the same fifteen
+# setup.sh passes (nine in gate group 1, six in group 2). A guest build without them keeps the guests
+# off; a plain build WITH them costs every player cycles.
+# setup.sh is compared when it sits alongside (copy it next to setup.ps1); without it only the counts are checked.
+$setupSh = Join-Path $PSScriptRoot 'setup.sh'
+foreach ($case in @(@('GRSEAF', '', ''), @('GRSEAF', 'x', ''), @('GRSEAF', '', 'p'), @('GRSEAF', 'x', 'p'),
+                    @('GRSPAF', 'x', 'p'), @('GRSJAF', 'x', ''), @('GRSEPS', '', 'p'), @('ZZZZZZ', 'x', 'p'))) {
+    $DiscId = $case[0]; $Spawn = $case[1]; $Heihachi = $case[2]
+    $LeaderCases = @()
+    Invoke-Expression $lcBlock
+    $sites = @($LeaderCases | Where-Object { $_ -match '^0x[0-9A-Fa-f]{8}@[12]$' })
+    $g1 = @($sites | Where-Object { $_ -like '*@1' }).Count
+    $g2 = @($sites | Where-Object { $_ -like '*@2' }).Count
+    $want = ($DiscId -eq 'GRSEAF') -and ($Spawn -or $Heihachi)
+    $label = "{0} spawn={1} heihachi={2}" -f $DiscId, [bool]$Spawn, [bool]$Heihachi
+    $bad = @()
+    if ($want -and ($g1 -ne 9 -or $g2 -ne 6)) { $bad += "expected 9+6 guest sites, got $g1+$g2" }
+    if (-not $want -and $sites.Count) { $bad += "$($sites.Count) guest sites on a build that must have none" }
+    if ($want -and (Test-Path -LiteralPath $setupSh)) {
+        $shText = Get-Content -LiteralPath $setupSh -Raw
+        $shSites = @([regex]::Matches($shText, '--gated-pc (0x[0-9A-Fa-f]{8}@[12])') | ForEach-Object { $_.Groups[1].Value })
+        if (Compare-Object $shSites $sites) { $bad += 'guest sites differ from setup.sh' }
+    }
+    if ($bad.Count) { Write-Host ("FAIL {0}: {1}" -f $label, ($bad -join '; ')); $failed++ }
+    else { Write-Host ("ok   {0}" -f $label) }
+}
+$Spawn = ''; $Heihachi = ''
 if ($failed) { Write-Host "$failed disc(s) failed"; exit 1 }
 exit 0

@@ -92,7 +92,8 @@ def build(guests, gc, out_dir, dol):
                        *({'group': 4, 'replace': r} for r in sorted(scenes)),
                        *({'group': 2, 'replace': r} for r in sorted(group2))],
              **{k: v.hex() for k, v in pools.items()}, 'guests': rows}
-        with open(manifest + '.tmp', 'w') as f: json.dump(m, f, indent=1)
+        # newline: the same bytes on every host (Windows would write CRLF).
+        with open(manifest + '.tmp', 'w', newline='\n') as f: json.dump(m, f, indent=1)
         os.replace(manifest + '.tmp', manifest)
         return m
     except BaseException:

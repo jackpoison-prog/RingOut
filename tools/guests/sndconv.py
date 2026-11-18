@@ -58,7 +58,7 @@ class DspEncoder:
         if not comps:
             raise ValueError('no C compiler found to build the sound encoder')
         self.dir = tempfile.mkdtemp(prefix='dspenc-')
-        exe = os.path.join(self.dir, 'dspenc')
+        exe = os.path.join(self.dir, 'dspenc.exe' if os.name == 'nt' else 'dspenc')
         src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dspenc.c')
         # Each in turn: SteamOS's `cc` can be a clang with no C headers while gcc beside it works.
         errors = []

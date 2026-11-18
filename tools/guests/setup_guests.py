@@ -7,7 +7,7 @@ old one (game/guests.new) and swapped in only when complete, so a failure or an 
 exactly as it was. A guest already installed whose image is not given is refused, so nobody loses one by accident.
 Exit status: 0 built (or already built, or with --check-image the images are usable), 1 the build failed, 3 refused.
 """
-import argparse, contextlib, hashlib, json, os, shutil, sys, traceback
+import argparse, contextlib, hashlib, json, os, shutil, struct, sys, traceback
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 for d in ('.', '../spawn', '../heihachi'): sys.path.insert(0, os.path.join(_HERE, d))
@@ -16,6 +16,9 @@ import build_guests, build_heihachi, build_spawn, ps2iso, releases, xiso
 BUILT, FAILED, REFUSED = 0, 1, 3
 HEADROOM = 64 << 20
 SPAWN_ID, HEIHACHI_ID = 29, 28
+# Each guest disc's own opening movie (the cut with that guest in it), beside the archive: the runtime's movie
+# player shows them in turn with the GameCube's.
+INTRO_SPAWN, INTRO_HEIHACHI = 'intro-spawn.sfd', 'intro-heihachi.sfd'
 
 
 class _Refused(Exception):
@@ -127,6 +130,31 @@ def build(out_dir, game, spawn, heihachi):
     return build_guests.build(guests, gc, out_dir, dol)
 
 
+def copy_intros(out_dir, spawn_image, heihachi_image):
+    """Copy each disc's opening movie (entry 0 of its movie.afs, a Sofdec stream) into out_dir, verbatim.
+
+    An extra, never a reason to fail: a disc without the movie, or a copy that cannot be written, leaves the
+    guests exactly as built and that intro out of the rotation. A movie already there at the right size is kept."""
+    for image, opener, name in ((spawn_image, xiso.open_image, INTRO_SPAWN),
+                                (heihachi_image, ps2iso.open_image, INTRO_HEIHACHI)):
+        if not image: continue
+        dst = os.path.join(out_dir, name)
+        try:
+            v = xiso.find(opener(image), 'movie.afs')
+            if v is None or v.size < 16: continue
+            magic, n, off, size = struct.unpack('<4sIII', v.read(0, 16))
+            if magic != b'AFS\0' or not n or size < 4 or off + size > v.size or v.read(off, 4) != b'\x00\x00\x01\xba':
+                print('%s: no opening movie on this disc' % name); continue
+            if os.path.isfile(dst) and os.path.getsize(dst) == size: continue
+            with open(dst + '.tmp', 'wb') as f:
+                for p in range(0, size, 1 << 24): f.write(v.read(off + p, min(1 << 24, size - p)))
+            os.replace(dst + '.tmp', dst)
+            print('%s: opening movie copied (%d bytes)' % (name, size))
+        except Exception as e:  # not BaseException: an interrupt still stops the build
+            print('%s: opening movie not copied (%s)' % (name, e))
+            with contextlib.suppress(OSError): os.remove(dst + '.tmp')
+
+
 def _names(spawn, heihachi):
     return ' and '.join(n for n, on in (('Spawn', spawn), ('Heihachi', heihachi)) if on)
 
@@ -148,15 +176,20 @@ def run(spawn_image, heihachi_image, game, log, check_only=False, build=build, s
         print(e); return REFUSED
     names = _names(spawn, heihachi)
     if _already_built(game, _sources(spawn, heihachi), gc_sha1):
+        # An install from before the intros gains them here; nothing else is touched.
+        with open(os.devnull, 'w') as null, contextlib.redirect_stdout(null):
+            copy_intros(os.path.join(game, 'guests'), spawn_image, heihachi_image)
         print('%s already built' % names); return BUILT
     os.makedirs(os.path.dirname(os.path.abspath(log)), exist_ok=True)
     new, cur, old, old_format = (os.path.join(game, n) for n in ('guests.new', 'guests', 'guests.old', 'spawn'))
-    with open(log, 'w') as lf:
+    # utf-8: the log names the images, and a Windows code page cannot write every path.
+    with open(log, 'w', encoding='utf-8') as lf:
         try:
             os.makedirs(new)
             with contextlib.redirect_stdout(lf):
                 print('%s: %s %s' % (names, spawn_image or '', heihachi_image or ''), flush=True)
                 build(new, game, spawn, heihachi)
+                copy_intros(new, spawn_image, heihachi_image)
             if os.path.isdir(cur): os.rename(cur, old)
             os.rename(new, cur)
             if os.path.isdir(old): shutil.rmtree(old)

@@ -14,6 +14,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 static int get(void* p, size_t n) { return fread(p, 1, n, stdin) == n; }
 static uint32_t le32(const unsigned char* b) { return b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24; }
@@ -22,6 +26,12 @@ static int64_t clamp(int64_t v, int64_t lo, int64_t hi) { return v < lo ? lo : v
 
 int main(void)
 {
+#ifdef _WIN32
+  /* Windows opens both pipes in text mode: a 0x1A sample byte ends the input and every 0x0A written
+   * gains a 0x0D. The protocol is binary. */
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
   for (;;)
   {
     unsigned char hdr[4 + 32];

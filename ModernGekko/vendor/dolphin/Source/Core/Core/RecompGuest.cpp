@@ -9,6 +9,7 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <utility>
 
 #include "Common/FileUtil.h"
 #include "Core/HW/Memmap.h"
@@ -125,6 +126,22 @@ bool ModuleRunsGuests(std::uint32_t groups)
   return !s_installed.heihachi || (groups & kHeihachiGateGroups);
 }
 
+std::vector<std::string> IntroMovies()
+{
+  std::lock_guard lock(s_mutex);
+  std::vector<std::string> out;
+  if (!s_unavailable.empty())
+    return out;
+  for (const auto& [installed, name] : {std::pair{s_installed.spawn, "intro-spawn.sfd"},
+                                        std::pair{s_installed.heihachi, "intro-heihachi.sfd"}})
+  {
+    const std::string path = s_game_root + "/guests/" + name;
+    if (installed && File::Exists(path))
+      out.push_back(path);
+  }
+  return out;
+}
+
 void SetModuleGateGroups(std::uint32_t groups)
 {
   s_module_groups = groups;
@@ -140,7 +157,11 @@ void SetSession(bool on)
   const bool sites = ModuleHasSites();  // after Initialize: which guests are installed decides it
   if (on && IsAvailable() && !sites)
     std::fprintf(stderr, "[guests] installed, but the game module was built without all of their code sites: "
+#ifdef _WIN32
+                         "run setup.ps1 again with your GameCube disc and -Spawn or -Heihachi\n");
+#else
                          "run setup.sh again with your GameCube disc and --spawn or --heihachi\n");
+#endif
   s_on = on && IsAvailable() && sites;
   s_patcher.Reset();
   s_sites_armed = false;

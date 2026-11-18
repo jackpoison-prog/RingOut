@@ -405,7 +405,7 @@ static bool CanSplit(OpcodeDecoder::Primitive primitive)
 // before the exemption changes. Positions come out of the loader as floats,
 // after a u32 matrix index when the format carries one (as CPUCull reads them).
 static bool OrthoDrawExtent(VertexLoaderBase* loader, const u8* src, int count, float* lo_out,
-                            float* hi_out)
+                            float* hi_out, float* ylo_out = nullptr, float* yhi_out = nullptr)
 {
   static std::vector<u8> scratch;
   const u32 stride = loader->m_native_vtx_decl.stride;
@@ -415,7 +415,7 @@ static bool OrthoDrawExtent(VertexLoaderBase* loader, const u8* src, int count, 
   const bool per_vertex_mtx = loader->m_native_vtx_decl.posmtx.enable;
   const u32 default_idx = g_main_cp_state.matrix_index_a.PosNormalMtxIdx & 0x3f;
   const auto& raw = xfmem.projection.rawProjection;
-  float lo = 1e30f, hi = -1e30f;
+  float lo = 1e30f, hi = -1e30f, ylo = 1e30f, yhi = -1e30f;
   for (int i = 0; i < loaded; ++i)
   {
     const u8* v = scratch.data() + static_cast<size_t>(i) * stride;
@@ -432,9 +432,21 @@ static bool OrthoDrawExtent(VertexLoaderBase* loader, const u8* src, int count, 
     const float clip_x = raw[0] * view_x + raw[1];
     lo = std::min(lo, clip_x);
     hi = std::max(hi, clip_x);
+    if (ylo_out)
+    {
+      const float view_y = row[4] * p[0] + row[5] * p[1] + row[6] * p[2] + row[7];
+      const float clip_y = raw[2] * view_y + raw[3];
+      ylo = std::min(ylo, clip_y);
+      yhi = std::max(yhi, clip_y);
+    }
   }
   *lo_out = lo;
   *hi_out = hi;
+  if (ylo_out)
+  {
+    *ylo_out = ylo;
+    *yhi_out = yhi;
+  }
   return loaded > 0;
 }
 
@@ -475,18 +487,29 @@ int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int coun
     }
 
     // Screen shape: a full-screen 2D overlay keeps the whole width while the
-    // HUD around it is narrowed to 16:9, and so does an effect the game projected
-    // from the 3D scene (StaticRecompRenderLayerHook.h).
+    // HUD around it is narrowed to 16:9, and an effect the game projected from
+    // the 3D scene takes the 3D's factor (StaticRecompRenderLayerHook.h).
     {
       auto& vsm = Core::System::GetInstance().GetVertexShaderManager();
       bool full = false;
+      bool scene = false;
       RecompOrthoSqueeze::EdgeMap edge;
       if (vsm.OrthoSqueezeWouldApply())
       {
-        float lo, hi;
+        float lo, hi, y_lo, y_hi;
+        const bool extent = OrthoDrawExtent(loader, src, count, &lo, &hi, &y_lo, &y_hi);
         if (vsm.InSceneEffect())
-          full = true;
-        else if (OrthoDrawExtent(loader, src, count, &lo, &hi))
+        {
+          // The fighters' shadows are laid over the scene by one full-screen
+          // draw of a screen-space copy, marked like the effects: it must stay
+          // full width, or it moves the shadows in toward the middle (21:9,
+          // measured 2026-11-17).
+          if (extent && RecompOrthoSqueeze::CoversFullWidth(lo, hi))
+            full = true;
+          else
+            scene = true;
+        }
+        else if (extent)
         {
           full = RecompOrthoSqueeze::CoversFullWidth(lo, hi) ||
                  RecompOrthoSqueeze::IsBackgroundTile(lo, hi);
@@ -497,8 +520,26 @@ int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int coun
             const float k = RecompOrthoSqueeze::g_factor.load(std::memory_order_relaxed);
             const int frame = g_presenter ? g_presenter->FrameCount() : 0;
             const bool filled = primitive < OpcodeDecoder::Primitive::GX_DRAW_LINES;
-            edge = RecompOrthoSqueeze::OnAnchor(lo, hi, filled ? static_cast<unsigned>(count) : 0u,
-                                                s_anchor, k, frame);
+            // Character select: the silhouette goes with the model it becomes,
+            // and the name under it stays under it, both while they slide in.
+            auto& models = vsm.SelectModels();
+            if (RecompOrthoSqueeze::IsSelectSilhouette(lo, hi, y_lo, y_hi))
+            {
+              const float side = lo + hi < 0.0f ? -1.0f : 1.0f;
+              float c;
+              if (!models.OnSide(side, &c))
+                c = side * RecompOrthoSqueeze::kSelectModelX;
+              const int i = side < 0.0f ? 0 : 1;
+              edge = RecompOrthoSqueeze::SelectSilhouette(
+                  lo, hi, y_lo, y_hi, models.has_body[i] ? models.body[i] : c,
+                  RecompOrthoSqueeze::g_3d_factor.load(std::memory_order_relaxed));
+              models.NoteCentre(c);
+            }
+            if (!edge.on)
+              edge = models.Under(lo, hi, y_hi, k);
+            if (!edge.on)
+              edge = RecompOrthoSqueeze::OnAnchor(lo, hi, filled ? static_cast<unsigned>(count) : 0u,
+                                                  s_anchor, k, frame);
             if (!edge.on)
             {
               edge = RecompOrthoSqueeze::EdgeAnchor(lo, hi, k);
@@ -508,12 +549,35 @@ int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int coun
           }
         }
       }
+      // Character select's models, for the silhouette and the names: only
+      // needed while the 3D is rescaled, and a 16:9 frame has thousands of 3D
+      // draws to skip (this ran on every one: +0.74% Deck cycles, 2026-11-17).
+      else if (xfmem.projection.type == ProjectionType::Perspective &&
+               RecompOrthoSqueeze::g_3d_factor.load(std::memory_order_relaxed) != 1.0f)
+      {
+        const auto& raw = xfmem.projection.rawProjection;
+        vsm.SelectModels().Note(raw[1]);
+        if (raw[1] <= -0.2f || raw[1] >= 0.2f)
+        {
+          // Where this draw's origin shows: x = m0 * tx / -tz - m2, with the
+          // 3D's width (VertexShaderManager).
+          const float* row = &xfmem.posMatrices[(g_main_cp_state.matrix_index_a.PosNormalMtxIdx & 0x3f) * 4];
+          const float tx = row[3];
+          const float tz = row[11];
+          if (tz < -0.01f)
+          {
+            const float k3d = RecompOrthoSqueeze::g_3d_factor.load(std::memory_order_relaxed);
+            vsm.SelectModels().NoteBody(raw[0] * k3d * tx / -tz - raw[1]);
+          }
+        }
+      }
       const RecompOrthoSqueeze::EdgeMap& was = vsm.OrthoEdge();
-      if (full != vsm.IsOrthoFullWidth() || edge.on != was.on || edge.a != was.a ||
-          edge.b != was.b)
+      if (full != vsm.IsOrthoFullWidth() || scene != vsm.IsOrthoSceneEffect() ||
+          edge.on != was.on || edge.a != was.a || edge.b != was.b)
       {
         g_vertex_manager->Flush();
         vsm.SetOrthoFullWidth(full);
+        vsm.SetOrthoSceneEffect(scene);
         vsm.SetOrthoEdge(edge);
       }
     }

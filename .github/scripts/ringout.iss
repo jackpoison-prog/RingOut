@@ -69,6 +69,7 @@ Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs c
 
 [Icons]
 Name: "{group}\{#AppName}";           Filename: "{app}\RingOut.exe"; WorkingDir: "{app}"
+Name: "{group}\Add guest fighters";   Filename: "{app}\RingOut.exe"; Parameters: "--add-guests"; WorkingDir: "{app}"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}";     Filename: "{app}\RingOut.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 

@@ -260,7 +260,11 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager& 
     const UPE_Copy PE_copy = bpmem.triggerEFBCopy;
     // A new frame starts outside any scene effect (RecompLayerMarkers.h).
     if (PE_copy.copy_to_xfb)
-      Core::System::GetInstance().GetVertexShaderManager().SetInSceneEffect(false);
+    {
+      auto& vsm = Core::System::GetInstance().GetVertexShaderManager();
+      vsm.SetInSceneEffect(false);
+      vsm.SelectModels().OnFrame();
+    }
 
     // Since the copy X and Y coordinates/sizes are 10-bit, the game can configure a copy region up
     // to 1024x1024. Hardware tests have found that the number of bytes written does not depend on

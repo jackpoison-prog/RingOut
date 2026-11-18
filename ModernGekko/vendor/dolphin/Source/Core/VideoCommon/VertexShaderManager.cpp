@@ -50,18 +50,31 @@ static float ShapeFactorForViewport()
   return RecompOrthoSqueeze::g_factor.load(std::memory_order_relaxed);
 }
 
+// The same for the 3D's factor (RecompOrthoSqueeze::g_3d_factor).
+float VertexShaderManager::Factor3DNow() const
+{
+  if (std::fabs(2.f * xfmem.viewport.wd) < EFB_WIDTH - 8)
+    return 1.0f;
+  return RecompOrthoSqueeze::g_3d_factor.load(std::memory_order_relaxed);
+}
+
 bool VertexShaderManager::OrthoSqueezeWouldApply() const
 {
   return xfmem.projection.type == ProjectionType::Orthographic &&
-         ShapeFactorForViewport() != 1.0f;
+         (ShapeFactorForViewport() != 1.0f || Factor3DNow() != 1.0f);
 }
 
 float VertexShaderManager::OrthoSqueezeNow() const
 {
-  if (xfmem.projection.type != ProjectionType::Orthographic &&
-      !RecompOrthoSqueeze::g_3d_follows_2d.load(std::memory_order_relaxed))
-    return 1.0f;
-  if (xfmem.projection.type == ProjectionType::Orthographic && m_ortho_full_width)
+  if (xfmem.projection.type != ProjectionType::Orthographic)
+  {
+    return RecompOrthoSqueeze::g_3d_follows_2d.load(std::memory_order_relaxed) ?
+               ShapeFactorForViewport() :
+               Factor3DNow();
+  }
+  if (m_ortho_scene_effect)
+    return Factor3DNow();
+  if (m_ortho_full_width)
     return 1.0f;
   if (xfmem.projection.type == ProjectionType::Orthographic && m_ortho_edge.on)
     return m_ortho_edge.a;
@@ -71,7 +84,7 @@ float VertexShaderManager::OrthoSqueezeNow() const
 float VertexShaderManager::OrthoShiftNow() const
 {
   if (xfmem.projection.type != ProjectionType::Orthographic || m_ortho_full_width ||
-      !m_ortho_edge.on)
+      m_ortho_scene_effect || !m_ortho_edge.on)
     return 0.0f;
   return m_ortho_edge.b;
 }
@@ -150,7 +163,8 @@ Common::Matrix44 VertexShaderManager::LoadProjectionMatrix()
   // (RecompOrthoSqueeze.h).
   RecompOrthoSqueeze::ApplyToProjection(
       m_projection_matrix.data(), xfmem.projection.type == ProjectionType::Orthographic,
-      m_ortho_squeeze_loaded);
+      m_ortho_squeeze_loaded,
+      RecompOrthoSqueeze::g_3d_follows_2d.load(std::memory_order_relaxed));
   m_projection_matrix[3] += m_ortho_shift_loaded;
 
   PRIM_LOG("Projection: {} {} {} {} {} {}", rawProjection[0], rawProjection[1], rawProjection[2],

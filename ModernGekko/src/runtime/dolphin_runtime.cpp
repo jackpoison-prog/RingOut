@@ -36,6 +36,7 @@
 #include "VideoCommon/RecompMenu.h"
 #include "VideoCommon/VideoConfig.h"
 #include "dolphin_runtime_internal.hpp"
+#include "deck_native_pad.hpp"
 #include "moderngekko/cpu_state.h"
 #include "moderngekko/module_loader.hpp"
 
@@ -230,6 +231,50 @@ void RebindPadsToPresentDevices() {
   for (const std::string &device : available) {
     if (device.starts_with("SDL/"))
       gamepads.push_back(device);
+  }
+
+  // On a Steam Deck, a pad on the Deck's own controller goes to the backend that
+  // reads it from the hardware (deck_native_pad.hpp): through Steam it otherwise
+  // lands on "Steam Virtual Gamepad", which can stay silent (RingOut#26). Only
+  // the Deck's own pad moves; an external pad keeps its binding.
+  const auto native = std::ranges::find_if(
+      available, [](const std::string &d) { return RingOutDeckPad::IsDeckNative(d); });
+  if (native != available.end() && std::getenv("RINGOUT_DECK_SDL_PAD") == nullptr) {
+    bool native_taken = false;
+    for (int i = 0; i < config->GetControllerCount(); ++i) {
+      auto *const pad = config->GetController(i);
+      if (pad != nullptr && pad->GetDefaultDevice().ToString() == *native)
+        native_taken = true;
+    }
+    for (int i = 0; i < config->GetControllerCount() && !native_taken; ++i) {
+      auto *const pad = config->GetController(i);
+      if (pad == nullptr)
+        continue;
+      const std::string current = pad->GetDefaultDevice().ToString();
+      if (!RingOutDeckPad::IsDeckSdlPad(current))
+        continue;
+      std::fprintf(stderr,
+                   "[input] pad %d: '%s' -> '%s' (the Deck's built-in controls, "
+                   "read directly; Steam Input cannot hide them)\n",
+                   i + 1, current.c_str(), native->c_str());
+      for (auto &group : pad->groups) {
+        for (auto &control : group->controls) {
+          const std::string expr = control->control_ref->GetExpression();
+          if (!expr.empty())
+            control->control_ref->SetExpression(RingOutDeckPad::Translate(expr));
+        }
+      }
+      ciface::Core::DeviceQualifier qualifier;
+      qualifier.FromString(*native);
+      pad->SetDefaultDevice(qualifier);
+      pad->UpdateReferences(g_controller_interface);
+      native_taken = true;
+    }
+    // The Deck's SDL names are the same physical pad as the native device:
+    // never hand one to another port, or one pad drives two players (the first
+    // Deck run of this fix moved pad 2 onto it).
+    if (native_taken)
+      std::erase_if(gamepads, [](const std::string &d) { return RingOutDeckPad::IsDeckSdlPad(d); });
   }
 
   // A device a WORKING port already holds is not available to a broken one.

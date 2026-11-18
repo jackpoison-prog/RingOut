@@ -4,8 +4,12 @@
 # game-derived ships with this package -- this script extracts the disc and
 # recompiles its executable here, on your machine.
 #
-# Usage:  .\setup.ps1 C:\path\to\your\disc.iso [-AddToSteam | -NoSteam]
+# Usage:  .\setup.ps1 C:\path\to\your\disc.iso [-Spawn C:\path\to\xbox.iso] [-Heihachi C:\path\to\ps2.iso] [-AddToSteam | -NoSteam]
+#         .\setup.ps1 -Spawn C:\path\to\xbox.iso      (add a guest to the install already here)
 #
+#   -Spawn       also build Spawn from your Xbox Soul Calibur II disc image
+#   -Heihachi    also build Heihachi from your PS2 Soul Calibur II disc image
+#                (US GameCube disc only; see SPAWN and HEIHACHI in README.txt)
 #   -AddToSteam  add Ring Out to Steam at the end without asking (closing and
 #                restarting Steam if it is running). -NoSteam: do not offer it.
 #
@@ -13,7 +17,7 @@
 # lld, cmake and ninja, so there is nothing for you to install.
 
 [CmdletBinding()]
-param([Parameter(Position = 0)][string]$Iso, [switch]$AddToSteam, [switch]$NoSteam)
+param([Parameter(Position = 0)][string]$Iso, [string]$Spawn, [string]$Heihachi, [switch]$AddToSteam, [switch]$NoSteam)
 
 $ErrorActionPreference = 'Stop'
 $Here  = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -22,13 +26,70 @@ $Tools = Join-Path $Here 'toolchain'
 
 function Die($msg) { Write-Host $msg -ForegroundColor Red; exit 1 }
 
-if (-not $Iso -or -not (Test-Path -LiteralPath $Iso -PathType Leaf)) {
-    Write-Host "Usage: .\setup.ps1 C:\path\to\your\disc.iso"
+# The guests, from the player's own Xbox and PS2 disc images, as setup.sh: tools\guests\setup_guests.py
+# does the work and every check, and never touches the install unless the new archive is complete.
+#   Invoke-Guests <xbox image or ""> <ps2 image or ""> [-CheckImage] -> the driver's status
+#   (0 built or usable, 1 failed, 3 refused)
+function Invoke-Guests([string]$SpawnImage, [string]$HeihachiImage, [switch]$CheckImage) {
+    $driver = if ($env:RINGOUT_GUESTS_DRIVER) { $env:RINGOUT_GUESTS_DRIVER } else { Join-Path $Here 'tools\guests\setup_guests.py' }
+    New-Item -ItemType Directory -Force -Path (Join-Path $Here 'work') | Out-Null
+    $guestArgs = @($driver)
+    if ($SpawnImage)    { $guestArgs += @('--spawn', $SpawnImage) }
+    if ($HeihachiImage) { $guestArgs += @('--heihachi', $HeihachiImage) }
+    $guestArgs += @('--game', (Join-Path $Here 'game'), '--log', (Join-Path $Here 'work\guests.log'))
+    if ($CheckImage) { $guestArgs += '--check-image' }
+    # CC: the sound encoder is compiled with the bundled clang, which is not on PATH.
+    # PYTHONUTF8: a path the console code page cannot write must not fail the build.
+    $oldCC = $env:CC; $oldUtf8 = $env:PYTHONUTF8
+    $env:CC = $Clang; $env:PYTHONUTF8 = '1'
+    try {
+        & $Python @guestArgs | ForEach-Object { Write-Host "    $_" }
+        return $LASTEXITCODE
+    } finally {
+        $env:CC = $oldCC; $env:PYTHONUTF8 = $oldUtf8
+    }
+}
+# After a refusal or a failure: carry on without the guests (the default, and what a run with nobody to
+# answer does) or stop. -> $true to carry on.
+function Confirm-WithoutGuests {
+    if ([Console]::IsInputRedirected) {
+        Write-Host "    continuing without the guest fighters"
+        return $true
+    }
+    $answer = Read-Host "  The guest fighters could not be built: continue without them? [Y/n]"
+    return ($answer -notmatch '^[Nn]')
+}
+# Whether the installed module was generated with the guests' code sites, as setup.sh: gate group 1
+# (bit 2 of DOLRECOMP_GATE_GROUPS in generated.h) and, for Heihachi, group 2 (bit 4).
+function Test-ModuleHasGuestSites([bool]$NeedHeihachi) {
+    $gen = Join-Path $Here 'work\out\generated\generated.h'
+    if (-not (Test-Path -LiteralPath $gen)) { return $false }
+    $line = Select-String -LiteralPath $gen -Pattern '^#define DOLRECOMP_GATE_GROUPS (0x[0-9A-Fa-f]+)u\s*$' | Select-Object -First 1
+    if (-not $line) { return $false }
+    $groups = [Convert]::ToInt32($line.Matches[0].Groups[1].Value, 16)
+    $need = if ($NeedHeihachi) { 6 } else { 2 }
+    return (($groups -band $need) -eq $need)
+}
+
+foreach ($image in @(@('Spawn', $Spawn), @('Heihachi', $Heihachi))) {
+    if ($image[1] -and -not (Test-Path -LiteralPath $image[1] -PathType Leaf)) {
+        Write-Host "-$($image[0]): no such file: $($image[1])" -ForegroundColor Red
+        exit 1
+    }
+}
+if ($Spawn)    { $Spawn    = (Resolve-Path -LiteralPath $Spawn).Path }
+if ($Heihachi) { $Heihachi = (Resolve-Path -LiteralPath $Heihachi).Path }
+$GuestsOnly = [bool](-not $Iso -and ($Spawn -or $Heihachi))
+
+if (-not $GuestsOnly -and (-not $Iso -or -not (Test-Path -LiteralPath $Iso -PathType Leaf))) {
+    Write-Host "Usage: .\setup.ps1 C:\path\to\your\disc.iso [-Spawn C:\path\to\xbox.iso] [-Heihachi C:\path\to\ps2.iso]"
     Write-Host ""
     Write-Host "Supply a GameCube disc image you already have."
+    Write-Host "  -Spawn     also build Spawn from your Xbox Soul Calibur II disc image"
+    Write-Host "  -Heihachi  also build Heihachi from your PS2 Soul Calibur II disc image"
     exit 1
 }
-$Iso = (Resolve-Path -LiteralPath $Iso).Path
+if ($Iso) { $Iso = (Resolve-Path -LiteralPath $Iso).Path }
 
 # --- toolchain ------------------------------------------------------------
 # Prefer the bundled toolchain; fall back to anything already on PATH so a
@@ -96,6 +157,39 @@ Most likely causes:
     Remove-Item -Recurse -Force -LiteralPath $probe -ErrorAction SilentlyContinue
 }
 Write-Host "Using C compiler: $Clang"
+
+# -Spawn or -Heihachi with no GameCube disc: only them, into the install already here. Nothing else
+# runs in this mode, so a refusal or a failure is the result, and the exit status says so.
+if ($GuestsOnly) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Here 'game\files\root.olk'))) {
+        Die "Guest-only setup needs an existing install: give your GameCube disc image too."
+    }
+    if (-not (Test-ModuleHasGuestSites ([bool]$Heihachi))) {
+        Die @"
+Adding guest fighters rebuilds the game with their code sites, which needs your GameCube disc:
+  .\setup.ps1 <your GameCube disc image> -Spawn <your Xbox disc image> -Heihachi <your PS2 disc image>
+  (either guest on its own works too)
+"@
+    }
+    Write-Host "==> Guest fighters"
+    $rc = Invoke-Guests $Spawn $Heihachi
+    if ($rc -ne 0) { Write-Host "  Nothing was changed." }
+    exit $rc
+}
+
+# A guest image that cannot be used is found now, before the long build, not after it. One image at a
+# time: a refused Xbox disc must not take a good PS2 disc's Heihachi with it.
+if ($Spawn -or $Heihachi) {
+    Write-Host "==> Guest fighters: checking the disc images"
+    if ($Spawn -and (Invoke-Guests $Spawn '' -CheckImage) -ne 0) {
+        if (-not (Confirm-WithoutGuests)) { Write-Host "  Stopped. Nothing was changed."; exit 1 }
+        $Spawn = ''
+    }
+    if ($Heihachi -and (Invoke-Guests '' $Heihachi -CheckImage) -ne 0) {
+        if (-not (Confirm-WithoutGuests)) { Write-Host "  Stopped. Nothing was changed."; exit 1 }
+        $Heihachi = ''
+    }
+}
 
 # --- 1/3 extract ----------------------------------------------------------
 # Check the image BEFORE the long extract, and say something useful. dolrecomp
@@ -235,6 +329,18 @@ elseif ($DiscId -eq 'GRSJAF') {
     # The idle PC protects itself.
     $LeaderCases = @('--leader-cases', '--direct-calls', '--self-calls')
 }
+# The guests' code sites and hooks, exactly as setup.sh (see there for what each is): gate group 1 is
+# Spawn's nine, group 2 Heihachi's six. ONLY WITH -Spawn OR -Heihachi, and all of them for either guest
+# (one module and one profile for any guest build): the gates cost every player cycles, so a build
+# without a guest is the ungated one. US disc only.
+if (($Spawn -or $Heihachi) -and $DiscId -eq 'GRSEAF') {
+    $LeaderCases += @(
+        '--gated-pc', '0x800834DC@1', '--gated-pc', '0x80083594@1', '--gated-pc', '0x800B5628@1',
+        '--gated-pc', '0x80091494@1', '--gated-pc', '0x8011D444@1', '--gated-pc', '0x8011DBE8@1',
+        '--gated-pc', '0x8011D574@1', '--gated-pc', '0x80178BD4@1', '--gated-pc', '0x80178C50@1',
+        '--gated-pc', '0x80032E44@2', '--gated-pc', '0x8015196C@2', '--gated-pc', '0x80151C44@2',
+        '--gated-pc', '0x80153244@2', '--gated-pc', '0x801530A4@2', '--gated-pc', '0x801521B8@2')
+}
 # Chunk overhang, as in setup.sh: US, Plus and PAL only (one chunk boundary on
 # those three falls inside a hot loop); not JP, whose layout does not straddle.
 if ($DiscId -in @('GRSEAF', 'GRSEPS', 'GRSPAF')) { $LeaderCases += @('--chunk-overhang', '512') }
@@ -310,6 +416,10 @@ $PgoProfile = Join-Path $Profiles "$DiscId.profdata"
 if (-not (Test-Path -LiteralPath $PgoProfile) -and $DiscId -eq 'GRSEPS') {
     $PgoProfile = Join-Path $Profiles 'GRSEAF.profdata'
 }
+# A guest build has their gated PCs, which change chunks' control flow: it takes the profile trained
+# with them, as setup.sh. Without one it keeps the ordinary profile (the CMakeLists drops what does not fit).
+$GuestProfile = Join-Path $Profiles "$DiscId.guests.profdata"
+if (($Spawn -or $Heihachi) -and (Test-Path -LiteralPath $GuestProfile)) { $PgoProfile = $GuestProfile }
 $PgoArgs = @()
 if (Test-Path -LiteralPath $PgoProfile) {
     $PgoArgs = @("-DMODULE_PGO_PROFILE=$PgoProfile")
@@ -351,6 +461,15 @@ if ($LASTEXITCODE -ne 0) { Die "Module build failed." }
 $dll = Join-Path $Work "build\g${DiscId}_recomp.dll"
 if (-not (Test-Path -LiteralPath $dll)) { Die "Module built but g${DiscId}_recomp.dll was not produced." }
 Copy-Item $dll (Join-Path $Here 'bin') -Force
+
+# The guests, now that the game data they are built against is in place (stage 1 starts from an empty game\).
+if ($Spawn -or $Heihachi) {
+    Write-Host "==> Guest fighters (a few minutes)"
+    if ((Invoke-Guests $Spawn $Heihachi) -ne 0 -and -not (Confirm-WithoutGuests)) {
+        Write-Host "  Stopped. The game itself is installed; run RingOut.exe to play."
+        exit 1
+    }
+}
 
 # The game's own artwork, taken from the disc you supplied -- the same step
 # setup.sh runs on Linux, and the same rule: NONE of it ships in this package.
